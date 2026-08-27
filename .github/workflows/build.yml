@@ -1,0 +1,90 @@
+name: test-build-release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+
+  build:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            artifact: taskian-windows-amd64.exe
+          - goos: linux
+            goarch: amd64
+            artifact: taskian-linux-amd64
+          - goos: darwin
+            goarch: amd64
+            artifact: taskian-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            artifact: taskian-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: >-
+          go build -trimpath
+          -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}"
+          -o "dist/${{ matrix.artifact }}"
+          ./cmd/taskian
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}" dist/*
+          --verify-tag
+          --generate-notes
+          --title "Taskian ${GITHUB_REF_NAME}"

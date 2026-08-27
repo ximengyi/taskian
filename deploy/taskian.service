@@ -1,0 +1,14 @@
+[Unit]
+Description=Taskian Wechatian AI task dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/taskian serve -config %h/.taskian/config.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+

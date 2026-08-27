@@ -1,0 +1,30 @@
+{
+  "vault_path": "C:\\Users\\Administrator\\Documents\\Obsidian Vault",
+  "inbox_dir": "Wechatian",
+  "outbox_dir": "Wechatian/outbox",
+  "state_path": "~/.taskian/state.json",
+  "poll_interval": "10s",
+  "skip_existing_on_first_run": true,
+  "max_reply_chars": 6000,
+  "agents": {
+    "codex": {
+      "command": "codex",
+      "args": [
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--output-last-message",
+        "{output}",
+        "{prompt}"
+      ],
+      "timeout": "45m"
+    }
+  },
+  "projects": {
+    "yuanze": {
+      "path": "D:\\figma\\yuanze",
+      "agent": "codex"
+    }
+  }
+}
+
