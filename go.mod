@@ -3,6 +3,8 @@ module github.com/ximengyi/taskian
 go 1.23.0
 
 require (
+	github.com/gofrs/flock v0.12.1
+	github.com/mattn/go-isatty v0.0.20
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	modernc.org/sqlite v1.36.3
 )
@@ -10,7 +12,6 @@ require (
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect

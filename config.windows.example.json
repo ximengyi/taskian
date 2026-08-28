@@ -1,11 +1,12 @@
 {
+  "mode": "controlled",
   "data_dir": "~/.taskian",
   "database_path": "~/.taskian/taskian.db",
   "channel": {
     "type": "ilink",
     "base_url": "https://ilinkai.weixin.qq.com",
     "state_path": "~/.taskian/ilink.json",
-    "channel_version": "taskian/0.3",
+    "channel_version": "taskian/0.4",
     "long_poll_timeout": "35s"
   },
   "max_reply_chars": 6000,

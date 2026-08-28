@@ -34,11 +34,13 @@ type Task struct {
 type CommandKind string
 
 const (
-	CommandTask   CommandKind = "task"
-	CommandReply  CommandKind = "reply"
-	CommandStatus CommandKind = "status"
-	CommandCancel CommandKind = "cancel"
-	CommandHelp   CommandKind = "help"
+	CommandTask    CommandKind = "task"
+	CommandReply   CommandKind = "reply"
+	CommandStatus  CommandKind = "status"
+	CommandCancel  CommandKind = "cancel"
+	CommandHelp    CommandKind = "help"
+	CommandProject CommandKind = "project"
+	CommandUse     CommandKind = "use"
 )
 
 type Command struct {
@@ -46,6 +48,8 @@ type Command struct {
 	Task   Task
 	TaskID string
 	Text   string
+	Action string
+	Args   []string
 }
 
 var (
@@ -122,6 +126,14 @@ func ParseCommand(in Incoming) (Command, error) {
 	if text == "" {
 		return Command{}, ErrNotCommand
 	}
+	lowerText := strings.ToLower(text)
+	if lowerText == "help" || strings.HasPrefix(lowerText, "help ") || text == "帮助" {
+		topic := ""
+		if strings.HasPrefix(lowerText, "help ") {
+			topic = strings.TrimSpace(text[len("help "):])
+		}
+		return Command{Kind: CommandHelp, Text: topic}, nil
+	}
 	lines := strings.Split(text, "\n")
 	header := strings.Fields(strings.TrimSpace(lines[0]))
 	if len(header) == 0 || !strings.HasPrefix(header[0], "#") {
@@ -161,7 +173,17 @@ func ParseCommand(in Incoming) (Command, error) {
 		}
 		return Command{Kind: CommandCancel, TaskID: strings.ToUpper(header[1])}, nil
 	case "#help":
-		return Command{Kind: CommandHelp}, nil
+		return Command{Kind: CommandHelp, Text: strings.TrimSpace(strings.TrimPrefix(text, header[0]))}, nil
+	case "#project":
+		if len(header) < 2 {
+			return Command{}, fmt.Errorf("#project 需要子命令：add/list/show/rename/remove/find")
+		}
+		return Command{Kind: CommandProject, Action: strings.ToLower(header[1]), Args: header[2:]}, nil
+	case "#use":
+		if len(header) != 2 {
+			return Command{}, fmt.Errorf("#use 格式应为：#use <项目名称>")
+		}
+		return Command{Kind: CommandUse, Text: strings.ToLower(header[1])}, nil
 	}
 	task, err := ParseTask(in)
 	if err != nil {
@@ -186,14 +208,21 @@ func ParseTask(in Incoming) (Task, error) {
 		}
 		agent, project = header[1], header[2]
 	} else {
-		if len(header) != 2 {
-			return Task{}, fmt.Errorf("快捷格式应为：#<agent> <项目>")
+		agent = strings.TrimPrefix(header[0], "#")
+		if len(header) >= 2 {
+			project = header[1]
 		}
-		agent, project = strings.TrimPrefix(header[0], "#"), header[1]
 	}
 	prompt := strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	if len(header) > 2 && !strings.EqualFold(header[0], "#taskian") {
+		prompt = strings.TrimSpace(strings.Join(header[2:], " ") + "\n" + prompt)
+	}
 	if prompt == "" {
-		return Task{}, fmt.Errorf("任务正文不能为空")
+		// The dispatcher may reinterpret the second token as prompt when a
+		// conversation already has a current project.
+		if project == "" {
+			return Task{}, fmt.Errorf("任务正文不能为空")
+		}
 	}
 	return Task{
 		Agent:   strings.ToLower(agent),

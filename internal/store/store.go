@@ -45,6 +45,11 @@ type Message struct {
 	CreatedAt                                    time.Time
 }
 
+type Project struct {
+	Name, Path                       string
+	CreatedAt, UpdatedAt, LastUsedAt time.Time
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
@@ -90,6 +95,13 @@ func (s *Store) init() error {
 			external_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
 			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE)`,
 		`CREATE TABLE IF NOT EXISTS channel_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS projects (
+			name TEXT PRIMARY KEY COLLATE NOCASE, path TEXT NOT NULL,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS conversation_preferences (
+			channel TEXT NOT NULL, conversation TEXT NOT NULL, current_project TEXT NOT NULL DEFAULT '',
+			default_agent TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+			PRIMARY KEY(channel, conversation))`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {
@@ -248,6 +260,110 @@ func (s *Store) SetChannelState(key, value string) error {
 func (s *Store) ResetIlinkState() error {
 	_, err := s.db.Exec(`DELETE FROM channel_state WHERE key='ilink.cursor' OR key LIKE 'ilink.context.%'`)
 	return err
+}
+
+func (s *Store) PutProject(name, path string) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	now := nowText()
+	_, err := s.db.Exec(`INSERT INTO projects(name,path,created_at,updated_at,last_used_at) VALUES(?,?,?,?,?)
+		ON CONFLICT(name) DO UPDATE SET path=excluded.path,updated_at=excluded.updated_at`, name, path, now, now, now)
+	return err
+}
+
+func (s *Store) Project(name string) (Project, error) {
+	var p Project
+	var created, updated, used string
+	err := s.db.QueryRow(`SELECT name,path,created_at,updated_at,last_used_at FROM projects WHERE name=?`, strings.ToLower(strings.TrimSpace(name))).Scan(&p.Name, &p.Path, &created, &updated, &used)
+	if err != nil {
+		return p, err
+	}
+	p.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	p.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	p.LastUsedAt, _ = time.Parse(time.RFC3339Nano, used)
+	return p, nil
+}
+
+func (s *Store) Projects() ([]Project, error) {
+	rows, err := s.db.Query(`SELECT name,path,created_at,updated_at,last_used_at FROM projects ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []Project
+	for rows.Next() {
+		var p Project
+		var created, updated, used string
+		if err := rows.Scan(&p.Name, &p.Path, &created, &updated, &used); err != nil {
+			return nil, err
+		}
+		p.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		p.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		p.LastUsedAt, _ = time.Parse(time.RFC3339Nano, used)
+		result = append(result, p)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RemoveProject(name string) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`DELETE FROM projects WHERE name=?`, name)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.Exec(`UPDATE conversation_preferences SET current_project='',updated_at=? WHERE current_project=?`, nowText(), name); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RenameProject(oldName, newName string) error {
+	oldName, newName = strings.ToLower(strings.TrimSpace(oldName)), strings.ToLower(strings.TrimSpace(newName))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE projects SET name=?,updated_at=? WHERE name=?`, newName, nowText(), oldName)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.Exec(`UPDATE conversation_preferences SET current_project=?,updated_at=? WHERE current_project=?`, newName, nowText(), oldName); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) TouchProject(name string) error {
+	_, err := s.db.Exec(`UPDATE projects SET last_used_at=? WHERE name=?`, nowText(), strings.ToLower(strings.TrimSpace(name)))
+	return err
+}
+
+func (s *Store) SetConversationProject(channel, conversation, project string) error {
+	_, err := s.db.Exec(`INSERT INTO conversation_preferences(channel,conversation,current_project,updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(channel,conversation) DO UPDATE SET current_project=excluded.current_project,updated_at=excluded.updated_at`, channel, conversation, strings.ToLower(project), nowText())
+	return err
+}
+
+func (s *Store) ConversationProject(channel, conversation string) (string, error) {
+	var project string
+	err := s.db.QueryRow(`SELECT current_project FROM conversation_preferences WHERE channel=? AND conversation=?`, channel, conversation).Scan(&project)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return project, err
 }
 
 func (s *Store) Counts() (map[string]int, error) {

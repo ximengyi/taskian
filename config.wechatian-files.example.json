@@ -1,4 +1,5 @@
 {
+  "mode": "controlled",
   "data_dir": "~/.taskian",
   "database_path": "~/.taskian/taskian.db",
   "channel": { "type": "wechatian-files" },

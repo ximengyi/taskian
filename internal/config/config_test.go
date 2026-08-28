@@ -54,7 +54,7 @@ func TestLoadResolvesInboxUnderVaultAndDefaultsSkipExisting(t *testing.T) {
 	}
 }
 
-func TestVersion03ExampleConfigsLoad(t *testing.T) {
+func TestVersion04ExampleConfigsLoad(t *testing.T) {
 	for _, name := range []string{"config.windows.example.json", "config.linux.example.json", "config.macos.example.json", "config.wechatian-files.example.json"} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := Load(filepath.Join("..", "..", name))
@@ -76,5 +76,22 @@ func TestHealthCanBeDisabled(t *testing.T) {
 	cfg := Config{Health: HealthConfig{Enabled: &disabled, Interval: "5m"}}
 	if cfg.HealthEnabled() {
 		t.Fatal("health should be disabled")
+	}
+}
+
+func TestWritePersonalConfigWithoutProjects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.json")
+	if err := WritePersonal(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != "personal" || cfg.DefaultAgent != "codex" || len(cfg.Projects) != 0 {
+		t.Fatalf("cfg=%+v", cfg)
+	}
+	if err := WritePersonal(path); err == nil {
+		t.Fatal("expected existing config refusal")
 	}
 }

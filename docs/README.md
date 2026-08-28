@@ -5,6 +5,7 @@
 ```text
 docs/0.2.md
 docs/0.3.md
+docs/0.4.md
 docs/1.0.md
 ```
 

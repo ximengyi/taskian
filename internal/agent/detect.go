@@ -55,12 +55,33 @@ func Detect() []Detection {
 			}
 		}
 	}
+	for _, special := range specialExecutables() {
+		if info, err := os.Stat(special.Path); err == nil && runnable(info) {
+			result = appendDetection(result, seen, special.Type, special.Path, "known-path")
+		}
+	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Type == result[j].Type {
 			return result[i].Path < result[j].Path
 		}
 		return result[i].Type < result[j].Type
 	})
+	return result
+}
+
+func specialExecutables() []Detection {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		return nil
+	}
+	var result []Detection
+	matches, _ := filepath.Glob(filepath.Join(base, "OpenAI", "Codex", "bin", "*", "codex.exe"))
+	for _, path := range matches {
+		result = append(result, Detection{Type: "codex", Path: path})
+	}
 	return result
 }
 

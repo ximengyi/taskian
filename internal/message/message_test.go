@@ -78,3 +78,26 @@ func TestParseTaskLongForm(t *testing.T) {
 		t.Fatalf("unexpected task: %#v", task)
 	}
 }
+
+func TestParseHelpVariantsAndProjectCommand(t *testing.T) {
+	for _, body := range []string{"help", "HELP project", "帮助", "#help task"} {
+		command, err := ParseCommand(Incoming{Body: body})
+		if err != nil || command.Kind != CommandHelp {
+			t.Fatalf("body=%q command=%+v err=%v", body, command, err)
+		}
+	}
+	command, err := ParseCommand(Incoming{Body: `#project add week-report D:\My Work\week-report`})
+	if err != nil || command.Kind != CommandProject || command.Action != "add" || len(command.Args) != 3 {
+		t.Fatalf("command=%+v err=%v", command, err)
+	}
+}
+
+func TestParseOneLineTask(t *testing.T) {
+	task, err := ParseTask(Incoming{Body: "#cursor week-report 写一下本周周报"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Agent != "cursor" || task.Project != "week-report" || task.Prompt != "写一下本周周报" {
+		t.Fatalf("task=%+v", task)
+	}
+}

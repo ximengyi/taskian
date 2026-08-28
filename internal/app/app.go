@@ -2,16 +2,19 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/gofrs/flock"
 	"github.com/ximengyi/taskian/internal/agent"
 	"github.com/ximengyi/taskian/internal/config"
 	"github.com/ximengyi/taskian/internal/ilink"
@@ -59,6 +62,27 @@ func New(cfg *config.Config, logger *log.Logger) (*Dispatcher, error) {
 		_ = state.Close()
 		return nil, err
 	}
+	if cfg.Mode == "personal" && len(cfg.Agents) == 0 {
+		cfg.Agents = map[string]config.AgentConfig{}
+		for _, found := range agent.Detect() {
+			if _, exists := cfg.Agents[found.Type]; exists {
+				continue
+			}
+			item := config.AgentConfig{Type: found.Type, Command: found.Path, Timeout: "45m"}
+			if found.Type == "codex" {
+				item.Sandbox = "workspace-write"
+			}
+			cfg.Agents[found.Type] = item
+		}
+	}
+	if _, exists := cfg.Agents[cfg.DefaultAgent]; !exists && len(cfg.Agents) > 0 {
+		names := make([]string, 0, len(cfg.Agents))
+		for name := range cfg.Agents {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		cfg.DefaultAgent = names[0]
+	}
 	adapters := make(map[string]agent.Adapter, len(cfg.Agents))
 	for name, agentCfg := range cfg.Agents {
 		resolved, found := agent.ResolveCommand(agentCfg.Type, agentCfg.Command)
@@ -86,14 +110,38 @@ func (d *Dispatcher) Close() error { _ = d.transport.Close(); return d.store.Clo
 
 func (d *Dispatcher) Serve(ctx context.Context) error {
 	defer d.Close()
+	instanceLock := flock.New(d.cfg.DatabasePath + ".lock")
+	locked, err := instanceLock.TryLock()
+	if err != nil {
+		return fmt.Errorf("获取单实例锁: %w", err)
+	}
+	if !locked {
+		return fmt.Errorf("另一个 Taskian 实例正在使用状态库 %s", d.cfg.DatabasePath)
+	}
+	defer instanceLock.Unlock()
 	workerCtx, stopWorkers := context.WithCancel(ctx)
 	defer d.workerWG.Wait()
 	defer stopWorkers()
 	if err := d.store.RecoverInterrupted(); err != nil {
 		return err
 	}
-	d.log.Printf("Taskian 0.3 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
+	d.log.Printf("Taskian 0.4 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
 	d.runHealthCheck(ctx, true)
+	_ = d.store.SetChannelState("service.heartbeat", time.Now().UTC().Format(time.RFC3339Nano))
+	d.workerWG.Add(1)
+	go func() {
+		defer d.workerWG.Done()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case now := <-ticker.C:
+				_ = d.store.SetChannelState("service.heartbeat", now.UTC().Format(time.RFC3339Nano))
+			}
+		}
+	}()
 	if d.cfg.HealthEnabled() {
 		d.workerWG.Add(1)
 		go func() {
@@ -215,27 +263,34 @@ func (d *Dispatcher) handle(ctx context.Context, in message.Incoming, async bool
 		return d.handleCancel(ctx, in, command.TaskID)
 	case message.CommandHelp:
 		_ = d.store.MarkInbound(in.Channel, in.ID, "help")
-		return d.send(ctx, in.Sender, helpText, "", "help")
+		return d.send(ctx, in.Sender, d.help(in, command.Text), "", "help")
+	case message.CommandProject:
+		return d.handleProject(ctx, in, command)
+	case message.CommandUse:
+		return d.handleUse(ctx, in, command.Text)
 	default:
 		return nil
 	}
 }
 
 func (d *Dispatcher) handleTask(ctx context.Context, in message.Incoming, task message.Task, async bool) error {
-	project, ok := d.cfg.Projects[task.Project]
-	if !ok {
-		_ = d.store.MarkInbound(in.Channel, in.ID, "rejected")
-		return d.send(ctx, in.Sender, fmt.Sprintf("⛔ 未授权的项目：%s\n允许的项目：%s", task.Project, strings.Join(sortedProjectNames(d.cfg.Projects), "、")), "", "rejected")
+	if task.Agent == "task" || task.Agent == "taskian" || task.Agent == "" {
+		task.Agent = d.cfg.DefaultAgent
 	}
-	if !project.Allows(task.Agent) {
+	projectName, projectPath, prompt, err := d.resolveTaskTarget(in, task)
+	if err != nil {
 		_ = d.store.MarkInbound(in.Channel, in.ID, "rejected")
-		return d.send(ctx, in.Sender, fmt.Sprintf("⛔ 项目 %s 不允许使用 %s。", task.Project, task.Agent), "", "rejected")
+		return d.send(ctx, in.Sender, "⚠️ "+err.Error(), "", "rejected")
+	}
+	if configured, ok := d.cfg.Projects[projectName]; d.cfg.Mode == "controlled" && (!ok || !configured.Allows(task.Agent)) {
+		_ = d.store.MarkInbound(in.Channel, in.ID, "rejected")
+		return d.send(ctx, in.Sender, fmt.Sprintf("⛔ 项目 %s 不允许使用 %s。", projectName, task.Agent), "", "rejected")
 	}
 	if _, ok := d.agents[task.Agent]; !ok {
 		_ = d.store.MarkInbound(in.Channel, in.ID, "rejected")
 		return d.send(ctx, in.Sender, "⛔ 未配置 Agent："+task.Agent, "", "rejected")
 	}
-	record, err := d.store.CreateTask(store.Task{SourceMessageID: in.ID, Channel: in.Channel, Sender: in.Sender, Conversation: in.Conversation, Agent: task.Agent, Project: task.Project, ProjectPath: project.Path, Prompt: task.Prompt, Status: store.StatusQueued})
+	record, err := d.store.CreateTask(store.Task{SourceMessageID: in.ID, Channel: in.Channel, Sender: in.Sender, Conversation: in.Conversation, Agent: task.Agent, Project: projectName, ProjectPath: projectPath, Prompt: prompt, Status: store.StatusQueued})
 	if err != nil {
 		return err
 	}
@@ -250,6 +305,224 @@ func (d *Dispatcher) handleTask(ctx context.Context, in message.Incoming, task m
 		d.execute(ctx, item)
 	}
 	return nil
+}
+
+func (d *Dispatcher) resolveTaskTarget(in message.Incoming, task message.Task) (name, path, prompt string, err error) {
+	target := strings.TrimSpace(task.Project)
+	prompt = strings.TrimSpace(task.Prompt)
+	resolve := func(value string) (string, string, bool) {
+		key := strings.ToLower(strings.TrimSpace(value))
+		if p, ok := d.cfg.Projects[key]; ok {
+			return key, p.Path, true
+		}
+		if p, e := d.store.Project(key); e == nil {
+			_ = d.store.TouchProject(key)
+			return p.Name, p.Path, true
+		}
+		if filepath.IsAbs(value) {
+			info, e := os.Stat(value)
+			if e == nil && info.IsDir() {
+				return filepath.Base(filepath.Clean(value)), filepath.Clean(value), true
+			}
+		}
+		return "", "", false
+	}
+	if target != "" {
+		if name, path, ok := resolve(target); ok {
+			return name, path, prompt, nil
+		}
+	}
+	current, e := d.store.ConversationProject(in.Channel, in.Conversation)
+	if e != nil {
+		return "", "", "", e
+	}
+	if current == "" {
+		current = d.cfg.DefaultProject
+	}
+	if current != "" {
+		if name, path, ok := resolve(current); ok {
+			if target != "" {
+				prompt = strings.TrimSpace(target + " " + prompt)
+			}
+			if prompt == "" {
+				return "", "", "", fmt.Errorf("任务内容不能为空")
+			}
+			return name, path, prompt, nil
+		}
+	}
+	if target == "" {
+		return "", "", "", fmt.Errorf("尚未选择项目，请使用 #use <项目> 或在任务中指定项目名称/绝对路径")
+	}
+	return "", "", "", fmt.Errorf("找不到项目或目录 %q；可先发送 #project add <名称> <绝对路径>", target)
+}
+
+func (d *Dispatcher) handleUse(ctx context.Context, in message.Incoming, name string) error {
+	p, err := d.store.Project(name)
+	if errors.Is(err, sql.ErrNoRows) {
+		if configured, ok := d.cfg.Projects[name]; ok {
+			p = store.Project{Name: name, Path: configured.Path}
+		} else {
+			return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+name, "", "project")
+		}
+	} else if err != nil {
+		return err
+	}
+	if err := d.store.SetConversationProject(in.Channel, in.Conversation, p.Name); err != nil {
+		return err
+	}
+	_ = d.store.TouchProject(p.Name)
+	_ = d.store.MarkInbound(in.Channel, in.ID, "project-use")
+	return d.send(ctx, in.Sender, fmt.Sprintf("✅ 当前项目：%s\n目录：%s", p.Name, p.Path), "", "project")
+}
+
+func (d *Dispatcher) handleProject(ctx context.Context, in message.Incoming, command message.Command) error {
+	args := command.Args
+	switch command.Action {
+	case "add":
+		if len(args) < 2 {
+			return d.send(ctx, in.Sender, "格式：#project add <名称> <绝对路径>", "", "project")
+		}
+		name, path := strings.ToLower(args[0]), filepath.Clean(strings.Join(args[1:], " "))
+		if !filepath.IsAbs(path) {
+			return d.send(ctx, in.Sender, "⚠️ 项目目录必须是绝对路径", "", "project")
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			return d.send(ctx, in.Sender, "⚠️ 项目目录不存在或不是目录："+path, "", "project")
+		}
+		if err := d.store.PutProject(name, path); err != nil {
+			return err
+		}
+		_ = d.store.MarkInbound(in.Channel, in.ID, "project-add")
+		return d.send(ctx, in.Sender, fmt.Sprintf("✅ 已注册项目 %s\n%s", name, path), "", "project")
+	case "list":
+		projects, err := d.store.Projects()
+		if err != nil {
+			return err
+		}
+		current, _ := d.store.ConversationProject(in.Channel, in.Conversation)
+		lines := []string{"项目列表："}
+		for _, p := range projects {
+			mark := ""
+			if p.Name == current {
+				mark = "（当前）"
+			}
+			lines = append(lines, fmt.Sprintf("- %s%s：%s", p.Name, mark, p.Path))
+		}
+		for name, p := range d.cfg.Projects {
+			lines = append(lines, fmt.Sprintf("- %s（配置）：%s", name, p.Path))
+		}
+		if len(lines) == 1 {
+			lines = append(lines, "尚未注册项目。使用：#project add <名称> <绝对路径>")
+		}
+		_ = d.store.MarkInbound(in.Channel, in.ID, "project-list")
+		return d.send(ctx, in.Sender, strings.Join(lines, "\n"), "", "project")
+	case "show":
+		if len(args) != 1 {
+			return d.send(ctx, in.Sender, "格式：#project show <名称>", "", "project")
+		}
+		p, err := d.store.Project(args[0])
+		if err != nil {
+			return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+args[0], "", "project")
+		}
+		return d.send(ctx, in.Sender, fmt.Sprintf("项目：%s\n目录：%s\n最近使用：%s", p.Name, p.Path, p.LastUsedAt.Local().Format("2006-01-02 15:04")), "", "project")
+	case "rename":
+		if len(args) != 2 {
+			return d.send(ctx, in.Sender, "格式：#project rename <旧名称> <新名称>", "", "project")
+		}
+		if err := d.store.RenameProject(args[0], args[1]); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+args[0], "", "project")
+			}
+			return err
+		}
+		return d.send(ctx, in.Sender, fmt.Sprintf("✅ 项目 %s 已重命名为 %s", args[0], args[1]), "", "project")
+	case "remove":
+		if len(args) != 1 {
+			return d.send(ctx, in.Sender, "格式：#project remove <名称>", "", "project")
+		}
+		if err := d.store.RemoveProject(args[0]); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+args[0], "", "project")
+			}
+			return err
+		}
+		return d.send(ctx, in.Sender, "✅ 已删除项目别名 "+args[0]+"；磁盘文件未改动。", "", "project")
+	case "find":
+		if len(args) < 2 {
+			return d.send(ctx, in.Sender, "格式：#project find <目录名> <搜索根目录>", "", "project")
+		}
+		matches, err := findDirectories(ctx, args[0], strings.Join(args[1:], " "), 10)
+		if err != nil {
+			return d.send(ctx, in.Sender, "⚠️ 查找失败："+err.Error(), "", "project")
+		}
+		if len(matches) == 0 {
+			return d.send(ctx, in.Sender, "没有找到名称为 "+args[0]+" 的目录。", "", "project")
+		}
+		lines := []string{"找到以下目录："}
+		for i, value := range matches {
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, value))
+		}
+		lines = append(lines, "\n注册：#project add "+args[0]+" <选择的路径>")
+		return d.send(ctx, in.Sender, strings.Join(lines, "\n"), "", "project")
+	default:
+		return d.send(ctx, in.Sender, "未知项目命令。发送 help project 查看用法。", "", "project")
+	}
+}
+
+func findDirectories(ctx context.Context, name, root string, limit int) ([]string, error) {
+	root = filepath.Clean(root)
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("搜索根目录不可用：%s", root)
+	}
+	var matches []string
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if walkErr != nil {
+			return filepath.SkipDir
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		base := entry.Name()
+		if path != root && (base == ".git" || base == "node_modules" || base == ".cache") {
+			return filepath.SkipDir
+		}
+		if path != root && strings.EqualFold(base, name) {
+			matches = append(matches, path)
+			if len(matches) >= limit {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	return matches, err
+}
+
+func (d *Dispatcher) help(in message.Incoming, topic string) string {
+	current, _ := d.store.ConversationProject(in.Channel, in.Conversation)
+	if current == "" {
+		current = "未设置"
+	}
+	agents := make([]string, 0, len(d.agents))
+	for name := range d.agents {
+		agents = append(agents, name)
+	}
+	sort.Strings(agents)
+	header := fmt.Sprintf("Taskian 0.4 帮助\n默认 Agent：%s\n可用 Agent：%s\n当前项目：%s\n", d.cfg.DefaultAgent, strings.Join(agents, "、"), current)
+	switch strings.ToLower(strings.TrimSpace(topic)) {
+	case "project":
+		return header + "\n#project add <名称> <绝对路径>\n#project list\n#project show <名称>\n#project rename <旧名> <新名>\n#project remove <名称>\n#project find <目录名> <根目录>\n#use <项目名称>"
+	case "task", "agent":
+		return header + "\n#task <项目> <任务>  使用默认 Agent\n#codex <项目> <任务>\n#cursor <项目> <任务>\n设置 #use 后可以省略项目。\n#reply <任务号> <回答>\n#status [任务号]\n#cancel <任务号>"
+	case "examples":
+		return header + "\n示例：\n#project add week-report D:\\work\\week-report\n#use week-report\n#cursor 写一下本周周报\n#task /srv/code/demo 运行测试\n#reply T-12345678 选择 B"
+	default:
+		return header + "\n任务：#task / #codex / #cursor\n回答：#reply <任务号> <回答>\n状态：#status / #cancel\n项目：#project / #use\n更多：help task、help project"
+	}
 }
 
 func (d *Dispatcher) handleReply(ctx context.Context, in message.Incoming, command message.Command, async bool) error {
@@ -466,12 +739,29 @@ func (d *Dispatcher) runHealthCheck(ctx context.Context, initial bool) {
 		d.updateHealth(ctx, "agent:"+name, "Agent "+name, d.agents[name].Check(), initial)
 	}
 	projects := sortedProjectNames(d.cfg.Projects)
+	checkedProjects := map[string]bool{}
 	for _, name := range projects {
+		checkedProjects[name] = true
 		info, err := os.Stat(d.cfg.Projects[name].Path)
 		if err == nil && !info.IsDir() {
 			err = fmt.Errorf("路径不是目录")
 		}
 		d.updateHealth(ctx, "project:"+name, "项目 "+name, err, initial)
+	}
+	registered, err := d.store.Projects()
+	if err != nil {
+		d.log.Printf("检查注册项目失败: %v", err)
+		return
+	}
+	for _, project := range registered {
+		if checkedProjects[project.Name] {
+			continue
+		}
+		info, statErr := os.Stat(project.Path)
+		if statErr == nil && !info.IsDir() {
+			statErr = fmt.Errorf("路径不是目录")
+		}
+		d.updateHealth(ctx, "project:"+project.Name, "项目 "+project.Name, statErr, initial)
 	}
 }
 
@@ -542,11 +832,3 @@ func sortedProjectNames(projects map[string]config.ProjectConfig) []string {
 	sort.Strings(names)
 	return names
 }
-
-const helpText = `Taskian 命令：
-#codex <项目>       创建 Codex 任务
-#taskian <Agent> <项目>  创建指定 Agent 任务
-#reply <任务号> <回答>   回答 Agent 问题
-#status [任务号]         查看状态
-#cancel <任务号>         取消任务
-#help                    显示帮助`

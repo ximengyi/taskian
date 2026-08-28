@@ -71,6 +71,41 @@ func TestHealthCheckNotifiesOnlyInitialFailuresAndChanges(t *testing.T) {
 		t.Fatalf("notifications=%d want=2: %v", len(channel.sent), channel.sent)
 	}
 }
+
+func TestPersonalProjectRegistrationUseAndDefaultRouting(t *testing.T) {
+	dir := t.TempDir()
+	state, err := store.Open(filepath.Join(dir, "taskian.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := &fakeTransport{}
+	adapter := &fakeAgent{}
+	cfg := &config.Config{Mode: "personal", DefaultAgent: "codex", MaxReplyChars: 6000, WaitingUserTimeout: "72h", Projects: map[string]config.ProjectConfig{}}
+	d := newDispatcher(cfg, state, channel, map[string]agent.Adapter{"codex": adapter}, log.New(io.Discard, "", 0))
+	defer d.Close()
+	channel.in = []message.Incoming{{ID: "p1", Channel: "test", Sender: "owner", Conversation: "owner", Body: "#project add demo " + dir, ReceivedAt: time.Now()}}
+	if err := d.poll(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	channel.in = []message.Incoming{{ID: "p2", Channel: "test", Sender: "owner", Conversation: "owner", Body: "#use demo", ReceivedAt: time.Now()}}
+	if err := d.poll(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	channel.in = []message.Incoming{{ID: "p3", Channel: "test", Sender: "owner", Conversation: "owner", Body: "#task\n写周报", ReceivedAt: time.Now()}}
+	if err := d.poll(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.starts != 1 {
+		t.Fatalf("starts=%d", adapter.starts)
+	}
+	waiting, err := state.WaitingFor("owner")
+	if err != nil || len(waiting) != 1 {
+		t.Fatalf("waiting=%v err=%v", waiting, err)
+	}
+	if waiting[0].ProjectPath != dir || waiting[0].Agent != "codex" {
+		t.Fatalf("task=%+v", waiting[0])
+	}
+}
 func (f *fakeAgent) Resume(_ context.Context, r agent.Request) (agent.Result, error) {
 	f.resumes++
 	if r.SessionID != "session-1" {

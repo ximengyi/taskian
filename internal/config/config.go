@@ -13,6 +13,9 @@ import (
 const DefaultIlinkBaseURL = "https://ilinkai.weixin.qq.com"
 
 type Config struct {
+	Mode                   string                   `json:"mode,omitempty"`
+	DefaultAgent           string                   `json:"default_agent,omitempty"`
+	DefaultProject         string                   `json:"default_project,omitempty"`
 	DataDir                string                   `json:"data_dir,omitempty"`
 	DatabasePath           string                   `json:"database_path,omitempty"`
 	Channel                ChannelConfig            `json:"channel,omitempty"`
@@ -83,6 +86,38 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+func WritePersonal(path string) error {
+	path = ExpandPath(path)
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("配置已存在：%s", path)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	enabled := true
+	cfg := Config{
+		Mode: "personal", DefaultAgent: "codex", DataDir: "~/.taskian", DatabasePath: "~/.taskian/taskian.db",
+		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.4", LongPollTimeout: "35s"},
+		PollInterval: "10s", MaxReplyChars: 6000, MaxConcurrentTasks: 2, WaitingUserTimeout: "72h",
+		Health: HealthConfig{Enabled: &enabled, Interval: "5m"}, Agents: map[string]AgentConfig{}, Projects: map[string]ProjectConfig{},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
+
 func (c *Config) Validate() error {
 	if c.Channel.Type != "ilink" && c.Channel.Type != "wechatian-files" {
 		return fmt.Errorf("channel.type 必须是 ilink 或 wechatian-files")
@@ -107,8 +142,11 @@ func (c *Config) Validate() error {
 	if _, err := time.ParseDuration(c.Channel.LongPollTimeout); err != nil {
 		return fmt.Errorf("channel.long_poll_timeout 无效: %w", err)
 	}
-	if len(c.Agents) == 0 || len(c.Projects) == 0 {
-		return fmt.Errorf("至少配置一个 agent 和一个项目")
+	if c.Mode != "personal" && c.Mode != "controlled" {
+		return fmt.Errorf("mode 必须是 personal 或 controlled")
+	}
+	if c.Mode == "controlled" && (len(c.Agents) == 0 || len(c.Projects) == 0) {
+		return fmt.Errorf("controlled 模式至少配置一个 agent 和一个项目")
 	}
 	for name, agent := range c.Agents {
 		if name == "" || agent.Command == "" {
@@ -172,8 +210,9 @@ func (p ProjectConfig) Allows(agent string) bool {
 func Example() Config {
 	enabled := true
 	return Config{
+		Mode: "controlled", DefaultAgent: "codex",
 		DataDir: "~/.taskian", DatabasePath: "~/.taskian/taskian.db",
-		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.3", LongPollTimeout: "35s"},
+		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.4", LongPollTimeout: "35s"},
 		PollInterval: "10s", MaxReplyChars: 6000, MaxConcurrentTasks: 2, WaitingUserTimeout: "72h",
 		Health: HealthConfig{Enabled: &enabled, Interval: "5m"},
 		Agents: map[string]AgentConfig{
@@ -185,6 +224,16 @@ func Example() Config {
 }
 
 func applyDefaults(c *Config) {
+	if c.Mode == "" {
+		if len(c.Projects) > 0 {
+			c.Mode = "controlled"
+		} else {
+			c.Mode = "personal"
+		}
+	}
+	if c.DefaultAgent == "" {
+		c.DefaultAgent = "codex"
+	}
 	if c.DataDir == "" {
 		c.DataDir = "~/.taskian"
 	}
@@ -205,7 +254,7 @@ func applyDefaults(c *Config) {
 		c.Channel.StatePath = filepath.Join(c.DataDir, "ilink.json")
 	}
 	if c.Channel.ChannelVersion == "" {
-		c.Channel.ChannelVersion = "taskian/0.3"
+		c.Channel.ChannelVersion = "taskian/0.4"
 	}
 	if c.Channel.LongPollTimeout == "" {
 		c.Channel.LongPollTimeout = "35s"
@@ -284,6 +333,8 @@ func resolvePaths(c *Config) {
 		projects[strings.ToLower(name)] = project
 	}
 	c.Projects = projects
+	c.DefaultAgent = strings.ToLower(c.DefaultAgent)
+	c.DefaultProject = strings.ToLower(c.DefaultProject)
 	agents := make(map[string]AgentConfig, len(c.Agents))
 	for name, agent := range c.Agents {
 		agents[strings.ToLower(name)] = agent

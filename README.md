@@ -8,7 +8,14 @@ Taskian 是一个跨平台、本地优先的双向 AI 任务调度器。它让�
 
 Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解析、权限检查、排队、去重和会话路由均使用确定性程序逻辑；模型用量来自实际执行任务的 Codex、Cursor 或其他 Agent。
 
-## 0.3 能力
+## 0.4 能力
+
+- 无参数运行进入首次启动向导：自动生成个人配置、探测 Agent、打印 iLink 二维码并选择后台运行。
+- Windows 双击即可初始化，后台使用当前用户任务计划程序；Linux 使用 systemd user service。
+- 项目既可直接使用绝对目录，也可注册成简短名称并设为当前项目。
+- 微信发送 `help`、`#help` 或 `帮助`即可查看任务和项目管理命令。
+- `#task` 使用默认 Agent；`#codex`、`#cursor` 可随任务切换 Agent。
+- 个人模式无需预先配置项目或发送者白名单；iLink 扫码身份是默认授权边界。
 
 - `serve` 启动时自动预检 Agent 登录状态和项目目录，不再要求手动运行 `check`。
 - 默认每 5 分钟健康检查；故障与恢复通过 iLink 提醒，不重复刷屏。
@@ -36,41 +43,30 @@ Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解�
    agent status
    ```
 
-2. 安装 Taskian 并准备配置：
+2. 安装 Taskian：
 
    ```sh
    install -Dm755 taskian-linux-amd64 ~/.local/bin/taskian
-   mkdir -p ~/.taskian
-   cp config.linux.example.json ~/.taskian/config.json
    ```
 
-3. 修改 `~/.taskian/config.json` 中的项目路径和允许的 Agent。
-
-4. 在纯命令行终端完成微信扫码绑定：
+3. 初始化、扫码并安装后台服务：
 
    ```sh
-   taskian ilink login
+   taskian
    ```
 
    终端会显示二维码，同时在 `~/.taskian/ilink-login-qr.png` 保存备用图片。登录凭据写入 `~/.taskian/ilink.json`。
 
-5. 启动（会自动预检）：
-
-   ```sh
-   taskian serve
-   ```
-
-   也可以提前运行 `taskian agents detect` 查看 Taskian 找到了哪些 Agent，或用 `taskian check` 做一次手动完整体检。
+   直接回车选择 `Y` 后，Taskian 会安装并启动 systemd user service。Rocky Linux 用户如需退出 SSH 后继续运行，应按提示启用 linger。
 
 仓库提供 [`deploy/taskian.service`](deploy/taskian.service) 作为 systemd user service 示例。
 
 ## Windows 与 macOS
 
-Windows 使用 `taskian-windows-amd64.exe` 和 [`config.windows.example.json`](config.windows.example.json)，macOS 根据芯片选择 `taskian-darwin-arm64` 或 `taskian-darwin-amd64` 并使用 [`config.macos.example.json`](config.macos.example.json)。配置完成后同样运行：
+Windows 可以直接双击 `taskian-windows-amd64.exe`。程序会自动生成配置、显示二维码，并询问是否后台运行；选择默认的 `Y` 后，确认后台启动成功即可关闭窗口。macOS 根据芯片选择对应程序并在终端运行。
 
 ```text
-taskian ilink login
-taskian serve
+taskian-windows-amd64.exe
 ```
 
 ## 微信命令
@@ -111,6 +107,18 @@ Agent 提问时，Taskian 返回类似：
 - `#cancel T-12AB34CD`：取消任务和本地 Agent 进程。
 - `#help`：显示帮助。
 
+注册和使用项目：
+
+```text
+#project add week-report D:\cursorwork\week-report
+#project list
+#use week-report
+#cursor 写一下本周周报
+#task week-report 写一下本周周报
+```
+
+也可以在任务中直接填写绝对目录。`#task` 使用默认 Agent，`#codex` 和 `#cursor` 明确选择 Agent。
+
 当用户只有一个等待回答的任务时，可以直接发送普通文本作为回答，也可以省略 `#reply` 后的任务号；有多个等待任务时必须使用完整的 `#reply <任务号> <回答>`。
 
 ## 上下文与记忆
@@ -118,7 +126,7 @@ Agent 提问时，Taskian 返回类似：
 Taskian 保存任务状态、用户可见的提问/回答和 Agent 会话 ID，但不复制 Agent 的隐藏推理或完整内部 transcript。
 
 ```text
-Taskian SQLite：任务、消息路由、thread_id/session_id、状态
+Taskian SQLite：任务、项目别名、会话偏好、消息路由、thread_id/session_id、状态
 Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
 ```
 
@@ -130,6 +138,8 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
 
 ```json
 {
+  "mode": "personal",
+  "default_agent": "codex",
   "database_path": "~/.taskian/taskian.db",
   "channel": {
     "type": "ilink",
@@ -138,23 +148,6 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
   "health": {
     "enabled": true,
     "interval": "5m"
-  },
-  "agents": {
-    "codex": {
-      "type": "codex",
-      "command": "codex",
-      "sandbox": "workspace-write"
-    },
-    "cursor": {
-      "type": "cursor",
-      "command": "agent"
-    }
-  },
-  "projects": {
-    "yuanze": {
-      "path": "/srv/code/yuanze",
-      "allowed_agents": ["codex", "cursor"]
-    }
   }
 }
 ```
@@ -162,6 +155,8 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
 常用字段：
 
 - `database_path`：SQLite 状态库路径。
+- `mode`：默认 `personal`；旧版带项目配置时自动保持 `controlled` 受控模式。
+- `default_agent`：未明确指定 Agent 时使用的默认值。
 - `channel.type`：`ilink` 或 `wechatian-files`。
 - `channel.allowed_senders`：可选发送者白名单；未配置时只允许扫码绑定用户。
 - `max_concurrent_tasks`：最大并发 Agent 数，默认 2。
@@ -169,8 +164,7 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
 - `health.enabled`：是否定时检查，默认开启；启动预检不受此项影响。
 - `health.interval`：健康检查间隔，默认 5 分钟。
 - `health.notify_senders`：可选提醒接收者；iLink 默认使用扫码绑定用户。
-- `agents.<name>.type`：`codex`、`cursor` 或 `generic`。
-- `projects.<name>.allowed_agents`：项目允许使用的 Agent。
+- `agents`、`projects`：个人模式可以省略；受控模式用于限制 Agent、项目和允许组合。
 
 Cursor 默认不会自动添加 `--force`；只有明确设置 `"force": true` 时才启用。Codex 默认使用 `workspace-write` 沙箱。
 
@@ -186,9 +180,17 @@ Cursor 默认不会自动添加 `--force`；只有明确设置 `"force": true` �
 
 ```text
 taskian serve                 持续运行
+taskian init                  初始化、扫码并选择后台运行
 taskian once                  接收一轮消息
 taskian check                 手动检查配置、Agent 登录状态和项目
 taskian agents detect         自动探测本机 Codex/Cursor CLI
+taskian service install       安装后台服务
+taskian service start         启动后台服务
+taskian service stop          停止后台服务
+taskian service restart       重启后台服务
+taskian service status        查看后台状态
+taskian service logs          查看后台日志
+taskian service uninstall     移除后台服务（保留数据）
 taskian status                查看本地任务统计
 taskian ilink login           扫码登录
 taskian ilink status          查看绑定状态
@@ -199,8 +201,8 @@ taskian version               显示版本
 
 ## 安全边界
 
-- 只允许配置中的发送者、项目和 Agent。
-- 微信消息不能提供任意工作目录或可执行程序。
+- iLink 个人模式只接受扫码绑定身份；受控模式可额外限制发送者、项目和 Agent。
+- 个人模式允许绝对项目目录，但微信消息不能指定任意可执行程序。
 - Taskian 直接启动进程，不通过 shell 解释任务正文。
 - `#reply` 只回答普通问题，不能扩大沙箱或系统权限。
 - 不自动批准提交、推送、部署或高风险删除。
@@ -241,6 +243,7 @@ Tag 推送后，GitHub Actions 自动测试并构建 Windows amd64、Linux amd64
 
 - [0.2 需求与验收标准](docs/0.2.md)
 - [0.3 需求与验收标准](docs/0.3.md)
+- [0.4 规划与验收标准](docs/0.4.md)
 - [产品定位与优势](docs/product-advantages.md)
 - [版本文档约定](docs/README.md)
 

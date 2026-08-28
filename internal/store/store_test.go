@@ -99,3 +99,43 @@ func TestWaitingTaskSurvivesRestart(t *testing.T) {
 		t.Fatalf("unexpected: %+v", got)
 	}
 }
+
+func TestProjectRegistryAndConversationPreference(t *testing.T) {
+	state, err := Open(filepath.Join(t.TempDir(), "taskian.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	path := filepath.Join(t.TempDir(), "week-report")
+	if err := state.PutProject("Week-Report", path); err != nil {
+		t.Fatal(err)
+	}
+	p, err := state.Project("week-report")
+	if err != nil || p.Path != path || p.Name != "week-report" {
+		t.Fatalf("project=%+v err=%v", p, err)
+	}
+	if err := state.SetConversationProject("ilink", "owner", "week-report"); err != nil {
+		t.Fatal(err)
+	}
+	current, err := state.ConversationProject("ilink", "owner")
+	if err != nil || current != "week-report" {
+		t.Fatalf("current=%q err=%v", current, err)
+	}
+	if err := state.RenameProject("week-report", "weekly"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Project("weekly"); err != nil {
+		t.Fatal(err)
+	}
+	current, err = state.ConversationProject("ilink", "owner")
+	if err != nil || current != "weekly" {
+		t.Fatalf("renamed current=%q err=%v", current, err)
+	}
+	if err := state.RemoveProject("weekly"); err != nil {
+		t.Fatal(err)
+	}
+	current, err = state.ConversationProject("ilink", "owner")
+	if err != nil || current != "" {
+		t.Fatalf("removed current=%q err=%v", current, err)
+	}
+}
