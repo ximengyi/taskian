@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -37,12 +38,38 @@ func (f *fakeTransport) Send(_ context.Context, _ string, text string) error {
 }
 func (f *fakeTransport) Close() error { return nil }
 
-type fakeAgent struct{ starts, resumes int }
+type fakeAgent struct {
+	starts, resumes int
+	checkErr        error
+}
 
-func (f *fakeAgent) Check() error { return nil }
+func (f *fakeAgent) Check() error { return f.checkErr }
 func (f *fakeAgent) Start(context.Context, agent.Request) (agent.Result, error) {
 	f.starts++
 	return agent.Result{Status: agent.NeedsInput, Question: "A 还是 B？", SessionID: "session-1"}, nil
+}
+
+func TestHealthCheckNotifiesOnlyInitialFailuresAndChanges(t *testing.T) {
+	dir := t.TempDir()
+	state, err := store.Open(filepath.Join(dir, "taskian.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := &fakeTransport{}
+	adapter := &fakeAgent{checkErr: errors.New("not logged in")}
+	cfg := &config.Config{
+		Health:   config.HealthConfig{NotifySenders: []string{"owner"}},
+		Projects: map[string]config.ProjectConfig{"p": {Path: dir}},
+	}
+	d := newDispatcher(cfg, state, channel, map[string]agent.Adapter{"cursor": adapter}, log.New(io.Discard, "", 0))
+	defer d.Close()
+	d.runHealthCheck(context.Background(), true)
+	d.runHealthCheck(context.Background(), false)
+	adapter.checkErr = nil
+	d.runHealthCheck(context.Background(), false)
+	if len(channel.sent) != 2 {
+		t.Fatalf("notifications=%d want=2: %v", len(channel.sent), channel.sent)
+	}
 }
 func (f *fakeAgent) Resume(_ context.Context, r agent.Request) (agent.Result, error) {
 	f.resumes++

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/ximengyi/taskian/internal/config"
@@ -13,7 +12,7 @@ import (
 
 type Cursor struct{ cfg config.AgentConfig }
 
-func (c *Cursor) Check() error                                         { _, err := exec.LookPath(c.cfg.Command); return err }
+func (c *Cursor) Check() error                                         { return checkCommand(c.cfg, "status") }
 func (c *Cursor) Start(ctx context.Context, r Request) (Result, error) { return c.run(ctx, r, false) }
 func (c *Cursor) Resume(ctx context.Context, r Request) (Result, error) {
 	if r.SessionID == "" {

@@ -54,7 +54,7 @@ func TestLoadResolvesInboxUnderVaultAndDefaultsSkipExisting(t *testing.T) {
 	}
 }
 
-func TestVersion02ExampleConfigsLoad(t *testing.T) {
+func TestVersion03ExampleConfigsLoad(t *testing.T) {
 	for _, name := range []string{"config.windows.example.json", "config.linux.example.json", "config.macos.example.json", "config.wechatian-files.example.json"} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := Load(filepath.Join("..", "..", name))
@@ -64,6 +64,17 @@ func TestVersion02ExampleConfigsLoad(t *testing.T) {
 			if cfg.DatabasePath == "" || len(cfg.Agents) < 1 || len(cfg.Projects) != 1 {
 				t.Fatalf("incomplete example: %+v", cfg)
 			}
+			if !cfg.HealthEnabled() || cfg.HealthDuration() <= 0 {
+				t.Fatalf("health check defaults are invalid: %+v", cfg.Health)
+			}
 		})
+	}
+}
+
+func TestHealthCanBeDisabled(t *testing.T) {
+	disabled := false
+	cfg := Config{Health: HealthConfig{Enabled: &disabled, Interval: "5m"}}
+	if cfg.HealthEnabled() {
+		t.Fatal("health should be disabled")
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/ximengyi/taskian/internal/config"
@@ -14,7 +13,7 @@ import (
 
 type Codex struct{ cfg config.AgentConfig }
 
-func (c *Codex) Check() error                                         { _, err := exec.LookPath(c.cfg.Command); return err }
+func (c *Codex) Check() error                                         { return checkCommand(c.cfg, "login", "status") }
 func (c *Codex) Start(ctx context.Context, r Request) (Result, error) { return c.run(ctx, r, false) }
 func (c *Codex) Resume(ctx context.Context, r Request) (Result, error) {
 	if r.SessionID == "" {

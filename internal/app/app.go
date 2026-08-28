@@ -36,6 +36,8 @@ type Dispatcher struct {
 	runningMu sync.Mutex
 	running   map[string]context.CancelFunc
 	workerWG  sync.WaitGroup
+	healthMu  sync.Mutex
+	health    map[string]bool
 }
 
 func New(cfg *config.Config, logger *log.Logger) (*Dispatcher, error) {
@@ -59,6 +61,12 @@ func New(cfg *config.Config, logger *log.Logger) (*Dispatcher, error) {
 	}
 	adapters := make(map[string]agent.Adapter, len(cfg.Agents))
 	for name, agentCfg := range cfg.Agents {
+		resolved, found := agent.ResolveCommand(agentCfg.Type, agentCfg.Command)
+		if found && resolved != agentCfg.Command {
+			logger.Printf("自动找到 Agent %s: %s", name, resolved)
+			agentCfg.Command = resolved
+			cfg.Agents[name] = agentCfg
+		}
 		a, e := agent.New(agentCfg)
 		if e != nil {
 			_ = channel.Close()
@@ -71,7 +79,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Dispatcher, error) {
 }
 
 func newDispatcher(cfg *config.Config, state *store.Store, channel transport.Transport, adapters map[string]agent.Adapter, logger *log.Logger) *Dispatcher {
-	return &Dispatcher{cfg: cfg, store: state, transport: channel, agents: adapters, log: logger, queue: make(chan work, 128), running: map[string]context.CancelFunc{}}
+	return &Dispatcher{cfg: cfg, store: state, transport: channel, agents: adapters, log: logger, queue: make(chan work, 128), running: map[string]context.CancelFunc{}, health: map[string]bool{}}
 }
 
 func (d *Dispatcher) Close() error { _ = d.transport.Close(); return d.store.Close() }
@@ -84,7 +92,15 @@ func (d *Dispatcher) Serve(ctx context.Context) error {
 	if err := d.store.RecoverInterrupted(); err != nil {
 		return err
 	}
-	d.log.Printf("Taskian 0.2 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
+	d.log.Printf("Taskian 0.3 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
+	d.runHealthCheck(ctx, true)
+	if d.cfg.HealthEnabled() {
+		d.workerWG.Add(1)
+		go func() {
+			defer d.workerWG.Done()
+			d.healthLoop(workerCtx)
+		}()
+	}
 	for i := 0; i < d.cfg.MaxConcurrentTasks; i++ {
 		d.workerWG.Add(1)
 		go func() {
@@ -425,6 +441,79 @@ func (d *Dispatcher) Check() error {
 		}
 	}
 	return nil
+}
+
+func (d *Dispatcher) healthLoop(ctx context.Context) {
+	ticker := time.NewTicker(d.cfg.HealthDuration())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.runHealthCheck(ctx, false)
+		}
+	}
+}
+
+func (d *Dispatcher) runHealthCheck(ctx context.Context, initial bool) {
+	names := make([]string, 0, len(d.agents))
+	for name := range d.agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		d.updateHealth(ctx, "agent:"+name, "Agent "+name, d.agents[name].Check(), initial)
+	}
+	projects := sortedProjectNames(d.cfg.Projects)
+	for _, name := range projects {
+		info, err := os.Stat(d.cfg.Projects[name].Path)
+		if err == nil && !info.IsDir() {
+			err = fmt.Errorf("路径不是目录")
+		}
+		d.updateHealth(ctx, "project:"+name, "项目 "+name, err, initial)
+	}
+}
+
+func (d *Dispatcher) updateHealth(ctx context.Context, key, label string, err error, initial bool) {
+	available := err == nil
+	d.healthMu.Lock()
+	previous, known := d.health[key]
+	d.health[key] = available
+	d.healthMu.Unlock()
+	if initial {
+		if available {
+			d.log.Printf("启动预检：%s 可用", label)
+		} else {
+			d.log.Printf("启动预检：%s 不可用: %v", label, err)
+			d.notifyHealth(ctx, fmt.Sprintf("⚠️ Taskian 启动预检：%s 不可用\n%s", label, err))
+		}
+		return
+	}
+	if known && previous == available {
+		return
+	}
+	if available {
+		d.log.Printf("%s 已恢复", label)
+		d.notifyHealth(ctx, fmt.Sprintf("✅ Taskian：%s 已恢复可用。", label))
+	} else {
+		d.log.Printf("%s 变为不可用: %v", label, err)
+		d.notifyHealth(ctx, fmt.Sprintf("⚠️ Taskian：%s 已不可用\n%s", label, err))
+	}
+}
+
+func (d *Dispatcher) notifyHealth(ctx context.Context, text string) {
+	recipients := append([]string(nil), d.cfg.Health.NotifySenders...)
+	if len(recipients) == 0 {
+		if source, ok := d.transport.(interface{ NotificationRecipients() []string }); ok {
+			recipients = source.NotificationRecipients()
+		}
+	}
+	for _, recipient := range recipients {
+		if err := d.transport.Send(ctx, recipient, text); err != nil {
+			d.log.Printf("发送健康提醒给 %s 失败: %v", recipient, err)
+		}
+	}
 }
 
 func formatTaskStatus(t store.Task) string {

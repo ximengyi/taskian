@@ -43,6 +43,34 @@ func runCommand(parent context.Context, cfg config.AgentConfig, dir string, args
 	return output.String(), nil
 }
 
+func checkCommand(cfg config.AgentConfig, args ...string) error {
+	path, err := exec.LookPath(cfg.Command)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = os.Environ()
+	for k, v := range cfg.Env {
+		cmd.Env = append(cmd.Env, k+"="+os.ExpandEnv(v))
+	}
+	var output limitedBuffer
+	output.max = 16 << 10
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("登录状态检查超时")
+		}
+		message := strings.TrimSpace(output.String())
+		if message != "" {
+			return fmt.Errorf("登录状态检查失败: %s", message)
+		}
+		return fmt.Errorf("登录状态检查失败: %w", err)
+	}
+	return nil
+}
+
 func parseEnvelope(text string) (envelope, error) {
 	text = strings.TrimSpace(text)
 	candidates := []string{text}

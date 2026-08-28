@@ -20,6 +20,7 @@ type Config struct {
 	MaxReplyChars          int                      `json:"max_reply_chars,omitempty"`
 	MaxConcurrentTasks     int                      `json:"max_concurrent_tasks,omitempty"`
 	WaitingUserTimeout     string                   `json:"waiting_user_timeout,omitempty"`
+	Health                 HealthConfig             `json:"health,omitempty"`
 	Agents                 map[string]AgentConfig   `json:"agents"`
 	Projects               map[string]ProjectConfig `json:"projects"`
 	VaultPath              string                   `json:"vault_path,omitempty"`
@@ -27,6 +28,12 @@ type Config struct {
 	OutboxDir              string                   `json:"outbox_dir,omitempty"`
 	StatePath              string                   `json:"state_path,omitempty"`
 	SkipExistingOnFirstRun bool                     `json:"skip_existing_on_first_run,omitempty"`
+}
+
+type HealthConfig struct {
+	Enabled       *bool    `json:"enabled,omitempty"`
+	Interval      string   `json:"interval,omitempty"`
+	NotifySenders []string `json:"notify_senders,omitempty"`
 }
 
 type ChannelConfig struct {
@@ -92,6 +99,11 @@ func (c *Config) Validate() error {
 	if _, err := time.ParseDuration(c.WaitingUserTimeout); err != nil {
 		return fmt.Errorf("waiting_user_timeout 无效: %w", err)
 	}
+	if duration, err := time.ParseDuration(c.Health.Interval); err != nil {
+		return fmt.Errorf("health.interval 无效: %w", err)
+	} else if duration <= 0 {
+		return fmt.Errorf("health.interval 必须大于 0")
+	}
 	if _, err := time.ParseDuration(c.Channel.LongPollTimeout); err != nil {
 		return fmt.Errorf("channel.long_poll_timeout 无效: %w", err)
 	}
@@ -142,6 +154,11 @@ func (c *Config) LongPollDuration() time.Duration {
 	duration, _ := time.ParseDuration(c.Channel.LongPollTimeout)
 	return duration
 }
+func (c *Config) HealthDuration() time.Duration {
+	duration, _ := time.ParseDuration(c.Health.Interval)
+	return duration
+}
+func (c *Config) HealthEnabled() bool { return c.Health.Enabled == nil || *c.Health.Enabled }
 
 func (p ProjectConfig) Allows(agent string) bool {
 	for _, allowed := range p.AllowedAgents {
@@ -153,10 +170,12 @@ func (p ProjectConfig) Allows(agent string) bool {
 }
 
 func Example() Config {
+	enabled := true
 	return Config{
 		DataDir: "~/.taskian", DatabasePath: "~/.taskian/taskian.db",
-		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.2", LongPollTimeout: "35s"},
+		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.3", LongPollTimeout: "35s"},
 		PollInterval: "10s", MaxReplyChars: 6000, MaxConcurrentTasks: 2, WaitingUserTimeout: "72h",
+		Health: HealthConfig{Enabled: &enabled, Interval: "5m"},
 		Agents: map[string]AgentConfig{
 			"codex":  {Type: "codex", Command: "codex", Timeout: "45m", Sandbox: "workspace-write"},
 			"cursor": {Type: "cursor", Command: "agent", Timeout: "45m"},
@@ -186,7 +205,7 @@ func applyDefaults(c *Config) {
 		c.Channel.StatePath = filepath.Join(c.DataDir, "ilink.json")
 	}
 	if c.Channel.ChannelVersion == "" {
-		c.Channel.ChannelVersion = "taskian/0.2"
+		c.Channel.ChannelVersion = "taskian/0.3"
 	}
 	if c.Channel.LongPollTimeout == "" {
 		c.Channel.LongPollTimeout = "35s"
@@ -205,6 +224,9 @@ func applyDefaults(c *Config) {
 	}
 	if c.WaitingUserTimeout == "" {
 		c.WaitingUserTimeout = "72h"
+	}
+	if c.Health.Interval == "" {
+		c.Health.Interval = "5m"
 	}
 	if c.MaxReplyChars <= 0 {
 		c.MaxReplyChars = 6000

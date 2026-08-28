@@ -12,6 +12,7 @@ import (
 	"sort"
 	"syscall"
 
+	"github.com/ximengyi/taskian/internal/agent"
 	"github.com/ximengyi/taskian/internal/app"
 	"github.com/ximengyi/taskian/internal/config"
 	"github.com/ximengyi/taskian/internal/ilink"
@@ -67,6 +68,8 @@ func run(args []string) error {
 		return dispatcher.Serve(ctx)
 	case "ilink":
 		return runIlink(args)
+	case "agents":
+		return runAgents(args)
 	case "example-config":
 		data, err := json.MarshalIndent(config.Example(), "", "  ")
 		if err != nil {
@@ -84,6 +87,38 @@ func run(args []string) error {
 		printHelp()
 		return fmt.Errorf("未知命令 %q", command)
 	}
+}
+
+func runAgents(args []string) error {
+	operation := "detect"
+	if len(args) > 0 && !startsFlag(args[0]) {
+		operation, args = args[0], args[1:]
+	}
+	if operation != "detect" {
+		return fmt.Errorf("未知 agents 命令 %q；可用命令：detect", operation)
+	}
+	fs := flag.NewFlagSet("agents detect", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "以 JSON 输出")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	found := agent.Detect()
+	if *asJSON {
+		data, err := json.MarshalIndent(found, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+	if len(found) == 0 {
+		fmt.Println("没有找到 Codex 或 Cursor Agent CLI。请先安装，并确保 codex/agent 命令可执行。")
+		return nil
+	}
+	for _, item := range found {
+		fmt.Printf("%s\t%s\t(%s)\n", item.Type, item.Path, item.Source)
+	}
+	return nil
 }
 
 func runIlink(args []string) error {
@@ -196,10 +231,11 @@ func printHelp() {
   taskian once [-config FILE]           接收一轮消息后退出
   taskian check [-config FILE]          检查配置、Agent 和项目
   taskian status [-config FILE]         查看本地任务状态
+  taskian agents detect [-json]         自动探测本机 Agent CLI
   taskian ilink login [-config FILE]    在终端扫码登录 iLink
   taskian ilink status [-config FILE]   查看 iLink 绑定状态
   taskian ilink logout [-config FILE]   清除 iLink 登录
-  taskian example-config                输出 0.2 示例配置
+  taskian example-config                输出 0.3 示例配置
   taskian version                       显示版本
 `)
 }

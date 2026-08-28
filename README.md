@@ -8,7 +8,12 @@ Taskian 是一个跨平台、本地优先的双向 AI 任务调度器。它让�
 
 Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解析、权限检查、排队、去重和会话路由均使用确定性程序逻辑；模型用量来自实际执行任务的 Codex、Cursor 或其他 Agent。
 
-## 0.2 能力
+## 0.3 能力
+
+- `serve` 启动时自动预检 Agent 登录状态和项目目录，不再要求手动运行 `check`。
+- 默认每 5 分钟健康检查；故障与恢复通过 iLink 提醒，不重复刷屏。
+- `agents detect` 自动查找 PATH 和常见安装目录中的 Codex/Cursor CLI。
+- 配置命令失效时自动采用探测到的同类型 CLI；一个 Agent 故障不影响其他 Agent。
 
 - 在终端打印二维码，直接登录腾讯 iLink，不依赖 Obsidian 或图形界面。
 - 支持微信文本消息长轮询、上下文 token、消息去重、断线恢复和长消息分段。
@@ -49,12 +54,13 @@ Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解�
 
    终端会显示二维码，同时在 `~/.taskian/ilink-login-qr.png` 保存备用图片。登录凭据写入 `~/.taskian/ilink.json`。
 
-5. 检查并启动：
+5. 启动（会自动预检）：
 
    ```sh
-   taskian check
    taskian serve
    ```
+
+   也可以提前运行 `taskian agents detect` 查看 Taskian 找到了哪些 Agent，或用 `taskian check` 做一次手动完整体检。
 
 仓库提供 [`deploy/taskian.service`](deploy/taskian.service) 作为 systemd user service 示例。
 
@@ -64,7 +70,6 @@ Windows 使用 `taskian-windows-amd64.exe` 和 [`config.windows.example.json`](c
 
 ```text
 taskian ilink login
-taskian check
 taskian serve
 ```
 
@@ -130,6 +135,10 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
     "type": "ilink",
     "state_path": "~/.taskian/ilink.json"
   },
+  "health": {
+    "enabled": true,
+    "interval": "5m"
+  },
   "agents": {
     "codex": {
       "type": "codex",
@@ -157,6 +166,9 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
 - `channel.allowed_senders`：可选发送者白名单；未配置时只允许扫码绑定用户。
 - `max_concurrent_tasks`：最大并发 Agent 数，默认 2。
 - `waiting_user_timeout`：等待微信回答的最长时间，默认 72 小时。
+- `health.enabled`：是否定时检查，默认开启；启动预检不受此项影响。
+- `health.interval`：健康检查间隔，默认 5 分钟。
+- `health.notify_senders`：可选提醒接收者；iLink 默认使用扫码绑定用户。
 - `agents.<name>.type`：`codex`、`cursor` 或 `generic`。
 - `projects.<name>.allowed_agents`：项目允许使用的 Agent。
 
@@ -175,7 +187,8 @@ Cursor 默认不会自动添加 `--force`；只有明确设置 `"force": true` �
 ```text
 taskian serve                 持续运行
 taskian once                  接收一轮消息
-taskian check                 检查配置、Agent 和项目
+taskian check                 手动检查配置、Agent 登录状态和项目
+taskian agents detect         自动探测本机 Codex/Cursor CLI
 taskian status                查看本地任务统计
 taskian ilink login           扫码登录
 taskian ilink status          查看绑定状态
@@ -198,7 +211,7 @@ Taskian 能限制入口和调度权限，但 Agent 最终能做什么仍取决�
 
 ## 当前限制
 
-- iLink 0.2 只处理文本和语音转写文本；图片、文件、视频和原始语音不会传给 Agent。
+- iLink 当前只处理文本和语音转写文本；图片、文件、视频和原始语音不会传给 Agent。
 - 腾讯 iLink 接口和服务规则可能变化，升级前应阅读 Release Note。
 - Taskian 崩溃时无法安全接管仍在运行的孤儿 Agent 进程；任务会标记为 `resume_failed`，不会重复原始操作。
 - 原生会话只能在保存该会话的同一系统用户和 Agent 数据目录中恢复。
@@ -227,6 +240,7 @@ Tag 推送后，GitHub Actions 自动测试并构建 Windows amd64、Linux amd64
 ## 文档
 
 - [0.2 需求与验收标准](docs/0.2.md)
+- [0.3 需求与验收标准](docs/0.3.md)
 - [产品定位与优势](docs/product-advantages.md)
 - [版本文档约定](docs/README.md)
 

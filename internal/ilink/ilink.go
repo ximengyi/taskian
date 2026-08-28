@@ -111,6 +111,13 @@ func New(cfg config.ChannelConfig, state *store.Store) (*Client, error) {
 
 func (c *Client) Name() string { return "ilink" }
 func (c *Client) Close() error { return nil }
+func (c *Client) NotificationRecipients() []string {
+	result := make([]string, 0, len(c.allowed))
+	for id := range c.allowed {
+		result = append(result, id)
+	}
+	return result
+}
 
 func (c *Client) Poll(ctx context.Context) ([]message.Incoming, error) {
 	cursor, err := c.store.GetChannelState("ilink.cursor")
