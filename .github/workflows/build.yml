@@ -85,8 +85,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}" dist/*
-          --verify-tag
-          --generate-notes
-          --title "Taskian ${GITHUB_REF_NAME}"
+        run: |
+          notes="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --notes-file "$notes" --title "Taskian ${GITHUB_REF_NAME}"
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "Taskian ${GITHUB_REF_NAME}"
+          fi

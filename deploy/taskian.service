@@ -1,5 +1,5 @@
 [Unit]
-Description=Taskian Wechatian AI task dispatcher
+Description=Taskian iLink bidirectional coding-agent dispatcher
 After=network-online.target
 Wants=network-online.target
 
@@ -11,4 +11,3 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-

@@ -14,10 +14,14 @@ import (
 )
 
 type Incoming struct {
-	ID        string
-	Source    string
-	Timestamp string
-	Body      string
+	ID           string
+	Source       string
+	Timestamp    string
+	Body         string
+	Channel      string
+	Sender       string
+	Conversation string
+	ReceivedAt   time.Time
 }
 
 type Task struct {
@@ -25,6 +29,23 @@ type Task struct {
 	Project string
 	Prompt  string
 	Source  Incoming
+}
+
+type CommandKind string
+
+const (
+	CommandTask   CommandKind = "task"
+	CommandReply  CommandKind = "reply"
+	CommandStatus CommandKind = "status"
+	CommandCancel CommandKind = "cancel"
+	CommandHelp   CommandKind = "help"
+)
+
+type Command struct {
+	Kind   CommandKind
+	Task   Task
+	TaskID string
+	Text   string
 }
 
 var (
@@ -83,13 +104,70 @@ func ParseFile(path string) ([]Incoming, error) {
 		source := filepath.Base(path)
 		sum := sha256.Sum256([]byte(source + "\x00" + match[1] + "\x00" + text))
 		result = append(result, Incoming{
-			ID:        hex.EncodeToString(sum[:]),
-			Source:    source,
-			Timestamp: match[1],
-			Body:      text,
+			ID:           hex.EncodeToString(sum[:]),
+			Source:       source,
+			Timestamp:    match[1],
+			Body:         text,
+			Channel:      "wechatian-files",
+			Sender:       "wechatian-owner",
+			Conversation: "wechatian-owner",
+			ReceivedAt:   ReceivedAt(Incoming{Source: source, Timestamp: match[1]}),
 		})
 	}
 	return result, nil
+}
+
+func ParseCommand(in Incoming) (Command, error) {
+	text := strings.TrimSpace(strings.ReplaceAll(in.Body, "\r\n", "\n"))
+	if text == "" {
+		return Command{}, ErrNotCommand
+	}
+	lines := strings.Split(text, "\n")
+	header := strings.Fields(strings.TrimSpace(lines[0]))
+	if len(header) == 0 || !strings.HasPrefix(header[0], "#") {
+		return Command{}, ErrNotCommand
+	}
+	switch strings.ToLower(header[0]) {
+	case "#reply":
+		rest := strings.TrimSpace(strings.TrimPrefix(text, header[0]))
+		if rest == "" {
+			return Command{}, fmt.Errorf("#reply 格式应为：#reply <任务号> <回答>")
+		}
+		var taskID, answer string
+		parts := strings.Fields(rest)
+		first := parts[0]
+		if strings.HasPrefix(strings.ToUpper(first), "T-") {
+			taskID = strings.ToUpper(first)
+			answer = strings.TrimSpace(strings.TrimPrefix(rest, first))
+		} else {
+			answer = rest
+		}
+		if answer == "" {
+			return Command{}, fmt.Errorf("回答内容不能为空")
+		}
+		return Command{Kind: CommandReply, TaskID: taskID, Text: answer}, nil
+	case "#status":
+		if len(header) > 2 {
+			return Command{}, fmt.Errorf("#status 格式应为：#status [任务号]")
+		}
+		id := ""
+		if len(header) == 2 {
+			id = strings.ToUpper(header[1])
+		}
+		return Command{Kind: CommandStatus, TaskID: id}, nil
+	case "#cancel":
+		if len(header) != 2 {
+			return Command{}, fmt.Errorf("#cancel 格式应为：#cancel <任务号>")
+		}
+		return Command{Kind: CommandCancel, TaskID: strings.ToUpper(header[1])}, nil
+	case "#help":
+		return Command{Kind: CommandHelp}, nil
+	}
+	task, err := ParseTask(in)
+	if err != nil {
+		return Command{}, err
+	}
+	return Command{Kind: CommandTask, Task: task}, nil
 }
 
 func ParseTask(in Incoming) (Task, error) {

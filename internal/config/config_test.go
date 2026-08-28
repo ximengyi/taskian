@@ -53,3 +53,17 @@ func TestLoadResolvesInboxUnderVaultAndDefaultsSkipExisting(t *testing.T) {
 		t.Fatalf("project agent=%q", got)
 	}
 }
+
+func TestVersion02ExampleConfigsLoad(t *testing.T) {
+	for _, name := range []string{"config.windows.example.json", "config.linux.example.json", "config.macos.example.json", "config.wechatian-files.example.json"} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(filepath.Join("..", "..", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.DatabasePath == "" || len(cfg.Agents) < 1 || len(cfg.Projects) != 1 {
+				t.Fatalf("incomplete example: %+v", cfg)
+			}
+		})
+	}
+}

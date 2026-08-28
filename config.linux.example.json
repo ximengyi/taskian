@@ -1,30 +1,33 @@
 {
-  "vault_path": "~/Documents/Obsidian Vault",
-  "inbox_dir": "Wechatian",
-  "outbox_dir": "Wechatian/outbox",
-  "state_path": "~/.taskian/state.json",
-  "poll_interval": "10s",
-  "skip_existing_on_first_run": true,
+  "data_dir": "~/.taskian",
+  "database_path": "~/.taskian/taskian.db",
+  "channel": {
+    "type": "ilink",
+    "base_url": "https://ilinkai.weixin.qq.com",
+    "state_path": "~/.taskian/ilink.json",
+    "channel_version": "taskian/0.2",
+    "long_poll_timeout": "35s"
+  },
   "max_reply_chars": 6000,
+  "max_concurrent_tasks": 2,
+  "waiting_user_timeout": "72h",
   "agents": {
     "codex": {
+      "type": "codex",
       "command": "codex",
-      "args": [
-        "exec",
-        "--sandbox",
-        "workspace-write",
-        "--output-last-message",
-        "{output}",
-        "{prompt}"
-      ],
+      "sandbox": "workspace-write",
+      "timeout": "45m"
+    },
+    "cursor": {
+      "type": "cursor",
+      "command": "agent",
       "timeout": "45m"
     }
   },
   "projects": {
     "my-project": {
-      "path": "~/work/my-project",
-      "agent": "codex"
+      "path": "/srv/code/my-project",
+      "allowed_agents": ["codex", "cursor"]
     }
   }
 }
-
