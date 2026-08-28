@@ -8,7 +8,7 @@ Taskian 是一个跨平台、本地优先的双向 AI 任务调度器。它让�
 
 Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解析、权限检查、排队、去重和会话路由均使用确定性程序逻辑；模型用量来自实际执行任务的 Codex、Cursor 或其他 Agent。
 
-## 0.4.1 能力
+## 0.4.2 能力
 
 - 无参数运行进入首次启动向导：自动生成个人配置、探测 Agent、打印 iLink 二维码并选择后台运行。
 - Windows 双击即可初始化，后台使用当前用户任务计划程序；Linux 使用 systemd user service。
@@ -17,6 +17,7 @@ Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解�
 - `#task` 使用默认 Agent；`#codex`、`#cursor` 可随任务切换 Agent。
 - 个人模式可直接发送普通任务文字；未选择项目时，默认 Agent 在当前用户主目录工作。
 - “帮我关一下机”等系统操作必须通过一次性确认码二次确认，避免误触。
+- Windows CMD 与日志文件显示收到的消息、任务路由、Agent 启动、实时输出以及完整失败原因。
 - 个人模式无需预先配置项目或发送者白名单；iLink 扫码身份是默认授权边界。
 
 - `serve` 启动时自动预检 Agent 登录状态和项目目录，不再要求手动运行 `check`。
@@ -185,6 +186,16 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
 - `agents`、`projects`：个人模式可以省略；受控模式用于限制 Agent、项目和允许组合。
 
 Cursor 默认不会自动添加 `--force`；只有明确设置 `"force": true` 时才启用。Codex 默认使用 `workspace-write` 沙箱。
+
+## 运行日志
+
+Windows 前台窗口会显示以下处理过程：收到微信消息、任务号、Agent、项目目录、Agent 实时输出、等待回答、完成或详细错误。后台服务会把相同内容同时写入：
+
+```text
+%USERPROFILE%\.taskian\logs\taskian.log
+```
+
+日志超过 5 MiB 后会在下次启动时轮换为 `taskian.log.1`。日志会包含用户主动发送的任务文字，便于本机排错，但不会打印 iLink 登录令牌或 Agent 环境变量。
 
 ## 通用 Agent
 

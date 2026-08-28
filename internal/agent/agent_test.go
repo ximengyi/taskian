@@ -1,6 +1,11 @@
 package agent
 
-import "testing"
+import (
+	"slices"
+	"testing"
+
+	"github.com/ximengyi/taskian/internal/config"
+)
 
 func TestParseEnvelope(t *testing.T) {
 	e, err := parseEnvelope(`{"status":"needs_input","message":"need choice","question":"A or B?"}`)
@@ -27,5 +32,14 @@ func TestCodexAndCursorSessionParsing(t *testing.T) {
 	}
 	if _, err := parseEnvelope(text); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCodexArgsAllowNonGitDirectory(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		args := codexArgs(config.AgentConfig{}, Request{Prompt: "test", ProjectPath: t.TempDir(), SessionID: "thread-1"}, resume, "schema.json", "output.json")
+		if !slices.Contains(args, "--skip-git-repo-check") {
+			t.Fatalf("resume=%v args=%v", resume, args)
+		}
 	}
 }

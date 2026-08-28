@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/ximengyi/taskian/internal/config"
@@ -13,7 +14,10 @@ const (
 	NeedsInput = "needs_input"
 )
 
-type Request struct{ Prompt, ProjectPath, SessionID string }
+type Request struct {
+	Prompt, ProjectPath, SessionID string
+	Output                         io.Writer
+}
 type Result struct{ Status, Message, Question, SessionID, Logs string }
 
 type Adapter interface {

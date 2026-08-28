@@ -7,6 +7,7 @@ import (
 	"log"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -171,10 +172,20 @@ func TestSystemActionDetectionDoesNotCaptureOrdinaryTasks(t *testing.T) {
 	if got := detectSystemAction("请帮我重启吧！"); got != "reboot" {
 		t.Fatalf("action=%q", got)
 	}
+	if got := detectSystemAction("关一下机"); got != "shutdown" {
+		t.Fatalf("action=%q", got)
+	}
 	for _, text := range []string{"修复 shutdown 命令的兼容问题", "怎么关机", "不要关机", "关闭机器上的测试服务"} {
 		if got := detectSystemAction(text); got != "" {
 			t.Fatalf("text=%q action=%q", text, got)
 		}
+	}
+}
+
+func TestAgentFailureIncludesDiagnosticOutput(t *testing.T) {
+	got := agentFailure(errors.New("agent 退出失败: exit status 1"), "Not inside a trusted directory\n")
+	if !strings.Contains(got, "exit status 1") || !strings.Contains(got, "Not inside a trusted directory") {
+		t.Fatalf("failure=%q", got)
 	}
 }
 

@@ -35,7 +35,7 @@ func (g *Generic) run(ctx context.Context, r Request, template []string) (Result
 	for i, v := range template {
 		args[i] = replacer.Replace(v)
 	}
-	logs, runErr := runCommand(ctx, g.cfg, r.ProjectPath, args)
+	logs, runErr := runCommand(ctx, g.cfg, r.ProjectPath, args, r.Output)
 	data, _ := os.ReadFile(path)
 	text := strings.TrimSpace(string(data))
 	if text == "" {

@@ -33,26 +33,8 @@ func (c *Codex) run(ctx context.Context, r Request, resume bool) (Result, error)
 	if err := os.WriteFile(schema, []byte(resultSchema), 0o600); err != nil {
 		return Result{}, err
 	}
-	var args []string
-	if resume {
-		args = []string{"exec", "resume", "--json", "--output-schema", schema, "-o", output}
-		if c.cfg.Model != "" {
-			args = append(args, "-m", c.cfg.Model)
-		}
-		args = append(args, c.cfg.Args...)
-		args = append(args, r.SessionID, resumePrompt(r.Prompt))
-	} else {
-		args = []string{"exec", "--json", "--output-schema", schema, "-o", output, "-C", r.ProjectPath}
-		if c.cfg.Sandbox != "" {
-			args = append(args, "-s", c.cfg.Sandbox)
-		}
-		if c.cfg.Model != "" {
-			args = append(args, "-m", c.cfg.Model)
-		}
-		args = append(args, c.cfg.Args...)
-		args = append(args, withContract(r.Prompt))
-	}
-	logs, runErr := runCommand(ctx, c.cfg, r.ProjectPath, args)
+	args := codexArgs(c.cfg, r, resume, schema, output)
+	logs, runErr := runCommand(ctx, c.cfg, r.ProjectPath, args, r.Output)
 	sessionID := codexSessionID(logs)
 	data, readErr := os.ReadFile(output)
 	if runErr != nil {
@@ -69,6 +51,29 @@ func (c *Codex) run(ctx context.Context, r Request, resume bool) (Result, error)
 		sessionID = r.SessionID
 	}
 	return Result{Status: e.Status, Message: e.Message, Question: e.Question, SessionID: sessionID, Logs: logs}, nil
+}
+
+func codexArgs(cfg config.AgentConfig, r Request, resume bool, schema, output string) []string {
+	var args []string
+	if resume {
+		args = []string{"exec", "resume", "--json", "--skip-git-repo-check", "--output-schema", schema, "-o", output}
+		if cfg.Model != "" {
+			args = append(args, "-m", cfg.Model)
+		}
+		args = append(args, cfg.Args...)
+		args = append(args, r.SessionID, resumePrompt(r.Prompt))
+	} else {
+		args = []string{"exec", "--json", "--skip-git-repo-check", "--output-schema", schema, "-o", output, "-C", r.ProjectPath}
+		if cfg.Sandbox != "" {
+			args = append(args, "-s", cfg.Sandbox)
+		}
+		if cfg.Model != "" {
+			args = append(args, "-m", cfg.Model)
+		}
+		args = append(args, cfg.Args...)
+		args = append(args, withContract(r.Prompt))
+	}
+	return args
 }
 
 func codexSessionID(logs string) string {

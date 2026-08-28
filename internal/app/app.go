@@ -131,7 +131,7 @@ func (d *Dispatcher) Serve(ctx context.Context) error {
 	if err := d.store.RecoverInterrupted(); err != nil {
 		return err
 	}
-	d.log.Printf("Taskian 0.4.1 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
+	d.log.Printf("Taskian 0.4.2 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
 	d.runHealthCheck(ctx, true)
 	_ = d.store.SetChannelState("service.heartbeat", time.Now().UTC().Format(time.RFC3339Nano))
 	d.workerWG.Add(1)
@@ -233,6 +233,7 @@ func (d *Dispatcher) poll(ctx context.Context, async bool) error {
 		if !claimed {
 			continue
 		}
+		d.log.Printf("收到消息：通道=%s 发送者=%s 消息=%s 内容=%q", incoming.Channel, incoming.Sender, incoming.ID, logText(incoming.Body, 500))
 		if e := d.handle(ctx, incoming, async); e != nil {
 			d.log.Printf("处理消息 %s 失败: %v", incoming.ID, e)
 			_ = d.store.MarkInbound(incoming.Channel, incoming.ID, "failed")
@@ -314,6 +315,7 @@ func (d *Dispatcher) handleTask(ctx context.Context, in message.Incoming, task m
 	if err := d.send(ctx, in.Sender, fmt.Sprintf("✅ [%s] 已接收\nAgent：%s\n项目：%s", record.ID, record.Agent, record.Project), record.ID, "accepted"); err != nil {
 		return err
 	}
+	d.log.Printf("任务已接收：任务=%s Agent=%s 项目=%s 目录=%q", record.ID, record.Agent, record.Project, record.ProjectPath)
 	item := work{task: record}
 	if async {
 		d.queue <- item
@@ -543,7 +545,7 @@ func (d *Dispatcher) help(in message.Incoming, topic string) string {
 		agents = append(agents, name)
 	}
 	sort.Strings(agents)
-	header := fmt.Sprintf("Taskian 0.4.1 帮助\n默认 Agent：%s\n可用 Agent：%s\n当前项目：%s\n", d.cfg.DefaultAgent, strings.Join(agents, "、"), current)
+	header := fmt.Sprintf("Taskian 0.4.2 帮助\n默认 Agent：%s\n可用 Agent：%s\n当前项目：%s\n", d.cfg.DefaultAgent, strings.Join(agents, "、"), current)
 	switch strings.ToLower(strings.TrimSpace(topic)) {
 	case "project":
 		return header + "\n#project add <名称> <绝对路径>\n#project list\n#project show <名称>\n#project rename <旧名> <新名>\n#project remove <名称>\n#project find <目录名> <根目录>\n#use <项目名称>"
@@ -565,7 +567,7 @@ func detectSystemAction(text string) string {
 	value := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(text), " ", ""))
 	value = strings.Trim(value, "。！!?，,；;")
 	value = strings.TrimSuffix(value, "吧")
-	for _, phrase := range []string{"帮我关一下机", "请帮我关一下机", "帮我关机", "请帮我关机", "现在关机", "立即关机", "关机", "shutdown", "poweroff"} {
+	for _, phrase := range []string{"帮我关一下机", "请帮我关一下机", "关一下机", "帮我关机", "请帮我关机", "现在关机", "立即关机", "关机", "shutdown", "poweroff"} {
 		if value == phrase {
 			return "shutdown"
 		}
@@ -750,17 +752,21 @@ func (d *Dispatcher) execute(parent context.Context, item work) {
 		return
 	}
 	adapter := d.agents[item.task.Agent]
-	request := agent.Request{Prompt: item.task.Prompt, ProjectPath: item.task.ProjectPath, SessionID: item.task.AgentSessionID}
+	output := &taskLogWriter{logger: d.log, taskID: item.task.ID}
+	request := agent.Request{Prompt: item.task.Prompt, ProjectPath: item.task.ProjectPath, SessionID: item.task.AgentSessionID, Output: output}
 	if item.resume {
 		request.Prompt = item.answer
 	}
 	var result agent.Result
 	var err error
 	if item.resume {
+		d.log.Printf("恢复 Agent：任务=%s Agent=%s 目录=%q 会话=%s", item.task.ID, item.task.Agent, item.task.ProjectPath, item.task.AgentSessionID)
 		result, err = adapter.Resume(ctx, request)
 	} else {
+		d.log.Printf("启动 Agent：任务=%s Agent=%s 目录=%q", item.task.ID, item.task.Agent, item.task.ProjectPath)
 		result, err = adapter.Start(ctx, request)
 	}
+	output.Flush()
 	if result.SessionID != "" {
 		_ = d.store.SetSession(item.task.ID, result.SessionID)
 		item.task.AgentSessionID = result.SessionID
@@ -770,8 +776,10 @@ func (d *Dispatcher) execute(parent context.Context, item work) {
 		if e == nil && current.Status == store.StatusCancelled {
 			return
 		}
-		_ = d.store.SetResult(item.task.ID, store.StatusFailed, "", err.Error())
-		_ = d.send(context.Background(), item.task.Sender, truncate(fmt.Sprintf("❌ [%s] 任务失败\n%s", item.task.ID, err), d.cfg.MaxReplyChars), item.task.ID, "failed")
+		detail := agentFailure(err, result.Logs)
+		d.log.Printf("任务失败：任务=%s Agent=%s 错误=%s", item.task.ID, item.task.Agent, logText(detail, 4000))
+		_ = d.store.SetResult(item.task.ID, store.StatusFailed, "", detail)
+		_ = d.send(context.Background(), item.task.Sender, truncate(fmt.Sprintf("❌ [%s] 任务失败\n%s", item.task.ID, detail), d.cfg.MaxReplyChars), item.task.ID, "failed")
 		return
 	}
 	if result.Status == agent.NeedsInput {
@@ -782,12 +790,77 @@ func (d *Dispatcher) execute(parent context.Context, item work) {
 			return
 		}
 		_ = d.store.SetWaiting(item.task.ID, result.SessionID, result.Question)
+		d.log.Printf("Agent 等待回答：任务=%s 会话=%s 问题=%q", item.task.ID, result.SessionID, logText(result.Question, 1000))
 		text := fmt.Sprintf("❓ [%s] %s 等待你的回答\n%s\n\n回复：#reply %s <你的回答>", item.task.ID, item.task.Agent, result.Question, item.task.ID)
 		_ = d.send(context.Background(), item.task.Sender, truncate(text, d.cfg.MaxReplyChars), item.task.ID, "question")
 		return
 	}
 	_ = d.store.SetResult(item.task.ID, store.StatusCompleted, result.Message, "")
+	d.log.Printf("任务完成：任务=%s Agent=%s 结果=%q", item.task.ID, item.task.Agent, logText(result.Message, 1000))
 	_ = d.send(context.Background(), item.task.Sender, truncate(fmt.Sprintf("✅ [%s] 任务完成\n%s", item.task.ID, result.Message), d.cfg.MaxReplyChars), item.task.ID, "completed")
+}
+
+type taskLogWriter struct {
+	mu     sync.Mutex
+	logger *log.Logger
+	taskID string
+	buffer strings.Builder
+}
+
+func (w *taskLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buffer.Write(p)
+	value := w.buffer.String()
+	for {
+		index := strings.IndexByte(value, '\n')
+		if index < 0 {
+			break
+		}
+		w.print(value[:index])
+		value = value[index+1:]
+	}
+	w.buffer.Reset()
+	w.buffer.WriteString(value)
+	return len(p), nil
+}
+
+func (w *taskLogWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.buffer.Len() > 0 {
+		w.print(w.buffer.String())
+		w.buffer.Reset()
+	}
+}
+
+func (w *taskLogWriter) print(value string) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		w.logger.Printf("Agent 输出：任务=%s %s", w.taskID, logText(value, 4000))
+	}
+}
+
+func agentFailure(err error, logs string) string {
+	detail := strings.TrimSpace(logs)
+	runes := []rune(detail)
+	if len(runes) > 2000 {
+		detail = string(runes[len(runes)-2000:])
+	}
+	if detail == "" {
+		return err.Error()
+	}
+	return err.Error() + "\n" + detail
+}
+
+func logText(value string, limit int) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\r", "")
+	value = strings.ReplaceAll(value, "\n", " ")
+	runes := []rune(value)
+	if len(runes) > limit {
+		value = string(runes[:limit]) + "…"
+	}
+	return value
 }
 
 func (d *Dispatcher) send(ctx context.Context, to, text, taskID, kind string) error {

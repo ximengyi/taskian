@@ -35,7 +35,7 @@ func (c *Cursor) run(ctx context.Context, r Request, resume bool) (Result, error
 	} else {
 		args = append(args, withContract(r.Prompt))
 	}
-	logs, err := runCommand(ctx, c.cfg, r.ProjectPath, args)
+	logs, err := runCommand(ctx, c.cfg, r.ProjectPath, args, r.Output)
 	session, text := parseCursorOutput(logs)
 	if session == "" {
 		session = r.SessionID

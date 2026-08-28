@@ -383,7 +383,7 @@ func printHelp() {
   taskian ilink login [-config FILE]    在终端扫码登录 iLink
   taskian ilink status [-config FILE]   查看 iLink 绑定状态
   taskian ilink logout [-config FILE]   清除 iLink 登录
-  taskian example-config                输出 0.4.1 示例配置
+  taskian example-config                输出 0.4.2 示例配置
   taskian version                       显示版本
 `)
 }

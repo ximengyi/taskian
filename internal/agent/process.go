@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -19,7 +20,7 @@ type envelope struct {
 	Question string `json:"question"`
 }
 
-func runCommand(parent context.Context, cfg config.AgentConfig, dir string, args []string) (string, error) {
+func runCommand(parent context.Context, cfg config.AgentConfig, dir string, args []string, live io.Writer) (string, error) {
 	timeout, _ := time.ParseDuration(cfg.Timeout)
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -31,8 +32,12 @@ func runCommand(parent context.Context, cfg config.AgentConfig, dir string, args
 	}
 	var output limitedBuffer
 	output.max = 2 << 20
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	writer := io.Writer(&output)
+	if live != nil {
+		writer = io.MultiWriter(&output, live)
+	}
+	cmd.Stdout = writer
+	cmd.Stderr = writer
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return output.String(), fmt.Errorf("agent 执行超过 %s", timeout)
