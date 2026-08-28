@@ -5,6 +5,7 @@ go 1.23.0
 require (
 	github.com/gofrs/flock v0.12.1
 	github.com/mattn/go-isatty v0.0.20
+	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	modernc.org/sqlite v1.36.3
 )
@@ -16,7 +17,9 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/term v0.13.0 // indirect
 	modernc.org/libc v1.61.13 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.8.2 // indirect
+	rsc.io/qr v0.2.0 // indirect
 )

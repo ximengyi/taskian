@@ -41,6 +41,7 @@ const (
 	CommandHelp    CommandKind = "help"
 	CommandProject CommandKind = "project"
 	CommandUse     CommandKind = "use"
+	CommandConfirm CommandKind = "confirm"
 )
 
 type Command struct {
@@ -184,6 +185,11 @@ func ParseCommand(in Incoming) (Command, error) {
 			return Command{}, fmt.Errorf("#use 格式应为：#use <项目名称>")
 		}
 		return Command{Kind: CommandUse, Text: strings.ToLower(header[1])}, nil
+	case "#confirm":
+		if len(header) != 2 {
+			return Command{}, fmt.Errorf("#confirm 格式应为：#confirm <确认码|cancel>")
+		}
+		return Command{Kind: CommandConfirm, Text: header[1]}, nil
 	}
 	task, err := ParseTask(in)
 	if err != nil {

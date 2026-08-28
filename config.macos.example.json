@@ -6,7 +6,7 @@
     "type": "ilink",
     "base_url": "https://ilinkai.weixin.qq.com",
     "state_path": "~/.taskian/ilink.json",
-    "channel_version": "taskian/0.4",
+    "channel_version": "taskian/0.4.1",
     "long_poll_timeout": "35s"
   },
   "max_reply_chars": 6000,

@@ -8,13 +8,15 @@ Taskian 是一个跨平台、本地优先的双向 AI 任务调度器。它让�
 
 Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解析、权限检查、排队、去重和会话路由均使用确定性程序逻辑；模型用量来自实际执行任务的 Codex、Cursor 或其他 Agent。
 
-## 0.4 能力
+## 0.4.1 能力
 
 - 无参数运行进入首次启动向导：自动生成个人配置、探测 Agent、打印 iLink 二维码并选择后台运行。
 - Windows 双击即可初始化，后台使用当前用户任务计划程序；Linux 使用 systemd user service。
 - 项目既可直接使用绝对目录，也可注册成简短名称并设为当前项目。
 - 微信发送 `help`、`#help` 或 `帮助`即可查看任务和项目管理命令。
 - `#task` 使用默认 Agent；`#codex`、`#cursor` 可随任务切换 Agent。
+- 个人模式可直接发送普通任务文字；未选择项目时，默认 Agent 在当前用户主目录工作。
+- “帮我关一下机”等系统操作必须通过一次性确认码二次确认，避免误触。
 - 个人模式无需预先配置项目或发送者白名单；iLink 扫码身份是默认授权边界。
 
 - `serve` 启动时自动预检 Agent 登录状态和项目目录，不再要求手动运行 `check`。
@@ -55,7 +57,7 @@ Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解�
    taskian
    ```
 
-   终端会显示二维码，同时在 `~/.taskian/ilink-login-qr.png` 保存备用图片。登录凭据写入 `~/.taskian/ilink.json`。
+   终端会显示二维码，同时在 `~/.taskian/ilink-login-qr.png` 保存高清备用图片。登录凭据写入 `~/.taskian/ilink.json`。
 
    直接回车选择 `Y` 后，Taskian 会安装并启动 systemd user service。Rocky Linux 用户如需退出 SSH 后继续运行，应按提示启用 linger。
 
@@ -63,13 +65,21 @@ Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解�
 
 ## Windows 与 macOS
 
-Windows 可以直接双击 `taskian-windows-amd64.exe`。程序会自动生成配置、显示二维码，并询问是否后台运行；选择默认的 `Y` 后，确认后台启动成功即可关闭窗口。macOS 根据芯片选择对应程序并在终端运行。
+Windows 可以直接双击 `taskian-windows-amd64.exe`。程序会自动生成配置、显示二维码，并自动打开高清二维码图片供微信扫描；选择默认的 `Y` 后，确认后台启动成功即可关闭窗口。macOS 根据芯片选择对应程序并在终端运行。
 
 ```text
 taskian-windows-amd64.exe
 ```
 
 ## 微信命令
+
+个人模式下可以直接发送自然语言任务，例如：
+
+```text
+帮我整理一下当前目录的 README
+```
+
+没有通过 `#use` 选择项目时，Taskian 使用默认 Agent，并以运行 Taskian 的用户主目录作为“全局”工作目录。
 
 创建 Codex 任务：
 
@@ -106,6 +116,14 @@ Agent 提问时，Taskian 返回类似：
 - `#status T-12AB34CD`：查看指定任务。
 - `#cancel T-12AB34CD`：取消任务和本地 Agent 进程。
 - `#help`：显示帮助。
+
+关机和重启属于内置高风险系统操作，不会直接交给 Agent。发送“帮我关一下机”后，Taskian 会返回一次性确认码；在 2 分钟内回复：
+
+```text
+#confirm A1B2C3
+```
+
+确认后 Windows 延迟 30 秒执行，Linux 延迟 1 分钟执行。回复 `#confirm cancel` 可取消尚未确认的操作。
 
 注册和使用项目：
 

@@ -2,12 +2,17 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -30,17 +35,18 @@ type work struct {
 }
 
 type Dispatcher struct {
-	cfg       *config.Config
-	store     *store.Store
-	transport transport.Transport
-	agents    map[string]agent.Adapter
-	log       *log.Logger
-	queue     chan work
-	runningMu sync.Mutex
-	running   map[string]context.CancelFunc
-	workerWG  sync.WaitGroup
-	healthMu  sync.Mutex
-	health    map[string]bool
+	cfg          *config.Config
+	store        *store.Store
+	transport    transport.Transport
+	agents       map[string]agent.Adapter
+	log          *log.Logger
+	queue        chan work
+	runningMu    sync.Mutex
+	running      map[string]context.CancelFunc
+	workerWG     sync.WaitGroup
+	healthMu     sync.Mutex
+	health       map[string]bool
+	systemRunner func(string) error
 }
 
 func New(cfg *config.Config, logger *log.Logger) (*Dispatcher, error) {
@@ -103,7 +109,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Dispatcher, error) {
 }
 
 func newDispatcher(cfg *config.Config, state *store.Store, channel transport.Transport, adapters map[string]agent.Adapter, logger *log.Logger) *Dispatcher {
-	return &Dispatcher{cfg: cfg, store: state, transport: channel, agents: adapters, log: logger, queue: make(chan work, 128), running: map[string]context.CancelFunc{}, health: map[string]bool{}}
+	return &Dispatcher{cfg: cfg, store: state, transport: channel, agents: adapters, log: logger, queue: make(chan work, 128), running: map[string]context.CancelFunc{}, health: map[string]bool{}, systemRunner: runSystemAction}
 }
 
 func (d *Dispatcher) Close() error { _ = d.transport.Close(); return d.store.Close() }
@@ -125,7 +131,7 @@ func (d *Dispatcher) Serve(ctx context.Context) error {
 	if err := d.store.RecoverInterrupted(); err != nil {
 		return err
 	}
-	d.log.Printf("Taskian 0.4 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
+	d.log.Printf("Taskian 0.4.1 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
 	d.runHealthCheck(ctx, true)
 	_ = d.store.SetChannelState("service.heartbeat", time.Now().UTC().Format(time.RFC3339Nano))
 	d.workerWG.Add(1)
@@ -238,12 +244,20 @@ func (d *Dispatcher) poll(ctx context.Context, async bool) error {
 func (d *Dispatcher) handle(ctx context.Context, in message.Incoming, async bool) error {
 	command, err := message.ParseCommand(in)
 	if errors.Is(err, message.ErrNotCommand) {
+		if d.cfg.Mode == "personal" {
+			if action := detectSystemAction(in.Body); action != "" {
+				return d.requestSystemConfirmation(ctx, in, action)
+			}
+		}
 		waiting, waitErr := d.store.WaitingFor(in.Sender)
 		if waitErr != nil {
 			return waitErr
 		}
 		if len(waiting) == 1 {
 			return d.handleReply(ctx, in, message.Command{Kind: message.CommandReply, TaskID: waiting[0].ID, Text: strings.TrimSpace(in.Body)}, async)
+		}
+		if len(waiting) == 0 && d.cfg.Mode == "personal" {
+			return d.handleTask(ctx, in, message.Task{Agent: d.cfg.DefaultAgent, Prompt: strings.TrimSpace(in.Body), Source: in}, async)
 		}
 		_ = d.store.MarkInbound(in.Channel, in.ID, "ignored")
 		return nil
@@ -268,6 +282,8 @@ func (d *Dispatcher) handle(ctx context.Context, in message.Incoming, async bool
 		return d.handleProject(ctx, in, command)
 	case message.CommandUse:
 		return d.handleUse(ctx, in, command.Text)
+	case message.CommandConfirm:
+		return d.handleConfirmation(ctx, in, command.Text)
 	default:
 		return nil
 	}
@@ -348,6 +364,17 @@ func (d *Dispatcher) resolveTaskTarget(in message.Incoming, task message.Task) (
 				return "", "", "", fmt.Errorf("任务内容不能为空")
 			}
 			return name, path, prompt, nil
+		}
+	}
+	if current == "" && d.cfg.Mode == "personal" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr == nil {
+			if prompt == "" {
+				prompt = strings.TrimSpace(target)
+			}
+			if prompt != "" {
+				return "global", home, prompt, nil
+			}
 		}
 	}
 	if target == "" {
@@ -505,24 +532,107 @@ func findDirectories(ctx context.Context, name, root string, limit int) ([]strin
 func (d *Dispatcher) help(in message.Incoming, topic string) string {
 	current, _ := d.store.ConversationProject(in.Channel, in.Conversation)
 	if current == "" {
-		current = "未设置"
+		if d.cfg.Mode == "personal" {
+			current = "全局"
+		} else {
+			current = "未设置"
+		}
 	}
 	agents := make([]string, 0, len(d.agents))
 	for name := range d.agents {
 		agents = append(agents, name)
 	}
 	sort.Strings(agents)
-	header := fmt.Sprintf("Taskian 0.4 帮助\n默认 Agent：%s\n可用 Agent：%s\n当前项目：%s\n", d.cfg.DefaultAgent, strings.Join(agents, "、"), current)
+	header := fmt.Sprintf("Taskian 0.4.1 帮助\n默认 Agent：%s\n可用 Agent：%s\n当前项目：%s\n", d.cfg.DefaultAgent, strings.Join(agents, "、"), current)
 	switch strings.ToLower(strings.TrimSpace(topic)) {
 	case "project":
 		return header + "\n#project add <名称> <绝对路径>\n#project list\n#project show <名称>\n#project rename <旧名> <新名>\n#project remove <名称>\n#project find <目录名> <根目录>\n#use <项目名称>"
 	case "task", "agent":
-		return header + "\n#task <项目> <任务>  使用默认 Agent\n#codex <项目> <任务>\n#cursor <项目> <任务>\n设置 #use 后可以省略项目。\n#reply <任务号> <回答>\n#status [任务号]\n#cancel <任务号>"
+		return header + "\n个人模式可直接发送普通文本，使用默认 Agent。\n#task <项目> <任务>\n#codex <项目> <任务>\n#cursor <项目> <任务>\n#reply <任务号> <回答>\n#confirm <确认码>  确认关机/重启\n#status [任务号]\n#cancel <任务号>"
 	case "examples":
 		return header + "\n示例：\n#project add week-report D:\\work\\week-report\n#use week-report\n#cursor 写一下本周周报\n#task /srv/code/demo 运行测试\n#reply T-12345678 选择 B"
 	default:
-		return header + "\n任务：#task / #codex / #cursor\n回答：#reply <任务号> <回答>\n状态：#status / #cancel\n项目：#project / #use\n更多：help task、help project"
+		return header + "\n个人模式可直接发送任务文字。\n任务：#task / #codex / #cursor\n回答：#reply <任务号> <回答>\n确认系统操作：#confirm <确认码>\n状态：#status / #cancel\n项目：#project / #use\n更多：help task、help project"
 	}
+}
+
+type pendingConfirmation struct {
+	Code, Action string
+	ExpiresAt    time.Time
+}
+
+func detectSystemAction(text string) string {
+	value := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(text), " ", ""))
+	value = strings.Trim(value, "。！!?，,；;")
+	value = strings.TrimSuffix(value, "吧")
+	for _, phrase := range []string{"帮我关一下机", "请帮我关一下机", "帮我关机", "请帮我关机", "现在关机", "立即关机", "关机", "shutdown", "poweroff"} {
+		if value == phrase {
+			return "shutdown"
+		}
+	}
+	for _, phrase := range []string{"帮我重启", "请帮我重启", "现在重启", "立即重启", "重启", "reboot"} {
+		if value == phrase {
+			return "reboot"
+		}
+	}
+	return ""
+}
+
+func (d *Dispatcher) requestSystemConfirmation(ctx context.Context, in message.Incoming, action string) error {
+	random := make([]byte, 3)
+	_, _ = rand.Read(random)
+	code := strings.ToUpper(hex.EncodeToString(random))
+	pending := pendingConfirmation{Code: code, Action: action, ExpiresAt: time.Now().Add(2 * time.Minute)}
+	data, _ := json.Marshal(pending)
+	if err := d.store.SetChannelState("confirm."+in.Sender, string(data)); err != nil {
+		return err
+	}
+	label := map[string]string{"shutdown": "关机", "reboot": "重启"}[action]
+	_ = d.store.MarkInbound(in.Channel, in.ID, "confirmation-required")
+	return d.send(ctx, in.Sender, fmt.Sprintf("⚠️ %s会中断当前任务和远程连接。\n如确定执行，请在 2 分钟内回复：\n#confirm %s\n\n取消：#confirm cancel", label, code), "", "confirmation")
+}
+
+func (d *Dispatcher) handleConfirmation(ctx context.Context, in message.Incoming, answer string) error {
+	key := "confirm." + in.Sender
+	if strings.EqualFold(answer, "cancel") {
+		_ = d.store.SetChannelState(key, "")
+		_ = d.store.MarkInbound(in.Channel, in.ID, "confirmation-cancelled")
+		return d.send(ctx, in.Sender, "已取消系统操作。", "", "confirmation")
+	}
+	value, err := d.store.GetChannelState(key)
+	if err != nil {
+		return err
+	}
+	var pending pendingConfirmation
+	if value == "" || json.Unmarshal([]byte(value), &pending) != nil || time.Now().After(pending.ExpiresAt) || !strings.EqualFold(answer, pending.Code) {
+		_ = d.store.MarkInbound(in.Channel, in.ID, "confirmation-invalid")
+		return d.send(ctx, in.Sender, "⚠️ 确认码无效或已过期，系统操作未执行。", "", "confirmation")
+	}
+	_ = d.store.SetChannelState(key, "")
+	_ = d.store.MarkInbound(in.Channel, in.ID, "confirmed")
+	label := map[string]string{"shutdown": "关机", "reboot": "重启"}[pending.Action]
+	if err := d.send(ctx, in.Sender, fmt.Sprintf("✅ 已确认%s，系统将在短暂延迟后执行。", label), "", "confirmation"); err != nil {
+		return err
+	}
+	if err := d.systemRunner(pending.Action); err != nil {
+		return d.send(ctx, in.Sender, "❌ 无法执行系统操作："+err.Error(), "", "confirmation")
+	}
+	return nil
+}
+
+func runSystemAction(action string) error {
+	if runtime.GOOS == "windows" {
+		flag := "/s"
+		if action == "reboot" {
+			flag = "/r"
+		}
+		return exec.Command("shutdown.exe", flag, "/t", "30", "/c", "Taskian confirmed system action").Run()
+	}
+	flag := "-h"
+	if action == "reboot" {
+		flag = "-r"
+	}
+	return exec.Command("shutdown", flag, "+1", "Taskian confirmed system action").Run()
 }
 
 func (d *Dispatcher) handleReply(ctx context.Context, in message.Incoming, command message.Command, async bool) error {

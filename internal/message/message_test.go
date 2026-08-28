@@ -101,3 +101,10 @@ func TestParseOneLineTask(t *testing.T) {
 		t.Fatalf("task=%+v", task)
 	}
 }
+
+func TestParseConfirm(t *testing.T) {
+	command, err := ParseCommand(Incoming{Body: "#confirm A1B2C3"})
+	if err != nil || command.Kind != CommandConfirm || command.Text != "A1B2C3" {
+		t.Fatalf("command=%+v err=%v", command, err)
+	}
+}

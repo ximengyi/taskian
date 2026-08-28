@@ -16,11 +16,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/mdp/qrterminal/v3"
 	qrcode "github.com/skip2/go-qrcode"
 	"github.com/ximengyi/taskian/internal/config"
 	"github.com/ximengyi/taskian/internal/message"
@@ -352,44 +355,28 @@ func pollQR(parent context.Context, client *http.Client, base, key string) (qrSt
 }
 
 func displayQR(content, statePath string) error {
-	code, err := qrcode.New(content, qrcode.Medium)
-	if err != nil {
-		return fmt.Errorf("生成二维码: %w", err)
-	}
-	bitmap := code.Bitmap()
 	fmt.Println()
-	for y := 0; y < len(bitmap); y += 2 {
-		var line strings.Builder
-		for x := range bitmap[y] {
-			top := bitmap[y][x]
-			bottom := false
-			if y+1 < len(bitmap) {
-				bottom = bitmap[y+1][x]
-			}
-			switch {
-			case top && bottom:
-				line.WriteRune('█')
-			case top:
-				line.WriteRune('▀')
-			case bottom:
-				line.WriteRune('▄')
-			default:
-				line.WriteRune(' ')
-			}
-		}
-		fmt.Println(line.String())
-	}
+	renderTerminalQR(content, os.Stdout)
 	dir := filepath.Dir(statePath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	pngPath := filepath.Join(dir, "ilink-login-qr.png")
-	if err := qrcode.WriteFile(content, qrcode.Medium, 512, pngPath); err != nil {
+	if err := qrcode.WriteFile(content, qrcode.High, 768, pngPath); err != nil {
 		return err
 	}
 	_ = os.Chmod(pngPath, 0o600)
-	fmt.Printf("\n如果终端二维码无法识别，请打开：%s\n", pngPath)
+	fmt.Printf("\n高清二维码已保存：%s\n", pngPath)
+	if runtime.GOOS == "windows" && os.Getenv("TASKIAN_NO_OPEN_QR") == "" {
+		if err := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", pngPath).Start(); err == nil {
+			fmt.Println("已自动打开高清二维码，请优先扫描图片窗口。")
+		}
+	}
 	return nil
+}
+
+func renderTerminalQR(content string, writer io.Writer) {
+	qrterminal.GenerateHalfBlock(content, qrterminal.M, writer)
 }
 
 func LoadCredentials(path string) (Credentials, error) {

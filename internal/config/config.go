@@ -96,7 +96,7 @@ func WritePersonal(path string) error {
 	enabled := true
 	cfg := Config{
 		Mode: "personal", DefaultAgent: "codex", DataDir: "~/.taskian", DatabasePath: "~/.taskian/taskian.db",
-		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.4", LongPollTimeout: "35s"},
+		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.4.1", LongPollTimeout: "35s"},
 		PollInterval: "10s", MaxReplyChars: 6000, MaxConcurrentTasks: 2, WaitingUserTimeout: "72h",
 		Health: HealthConfig{Enabled: &enabled, Interval: "5m"}, Agents: map[string]AgentConfig{}, Projects: map[string]ProjectConfig{},
 	}
@@ -212,7 +212,7 @@ func Example() Config {
 	return Config{
 		Mode: "controlled", DefaultAgent: "codex",
 		DataDir: "~/.taskian", DatabasePath: "~/.taskian/taskian.db",
-		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.4", LongPollTimeout: "35s"},
+		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.4.1", LongPollTimeout: "35s"},
 		PollInterval: "10s", MaxReplyChars: 6000, MaxConcurrentTasks: 2, WaitingUserTimeout: "72h",
 		Health: HealthConfig{Enabled: &enabled, Interval: "5m"},
 		Agents: map[string]AgentConfig{
@@ -254,7 +254,7 @@ func applyDefaults(c *Config) {
 		c.Channel.StatePath = filepath.Join(c.DataDir, "ilink.json")
 	}
 	if c.Channel.ChannelVersion == "" {
-		c.Channel.ChannelVersion = "taskian/0.4"
+		c.Channel.ChannelVersion = "taskian/0.4.1"
 	}
 	if c.Channel.LongPollTimeout == "" {
 		c.Channel.LongPollTimeout = "35s"

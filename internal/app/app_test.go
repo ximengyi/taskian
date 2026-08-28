@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -106,6 +107,77 @@ func TestPersonalProjectRegistrationUseAndDefaultRouting(t *testing.T) {
 		t.Fatalf("task=%+v", waiting[0])
 	}
 }
+
+func TestPersonalPlainTextUsesDefaultAgentAndGlobalHome(t *testing.T) {
+	dir := t.TempDir()
+	state, err := store.Open(filepath.Join(dir, "taskian.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := &fakeTransport{}
+	adapter := &fakeAgent{}
+	cfg := &config.Config{Mode: "personal", DefaultAgent: "codex", MaxReplyChars: 6000, WaitingUserTimeout: "72h", Projects: map[string]config.ProjectConfig{}}
+	d := newDispatcher(cfg, state, channel, map[string]agent.Adapter{"codex": adapter}, log.New(io.Discard, "", 0))
+	defer d.Close()
+	channel.in = []message.Incoming{{ID: "plain-task", Channel: "test", Sender: "owner", Conversation: "owner", Body: "写一下周报", ReceivedAt: time.Now()}}
+	if err := d.poll(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := state.WaitingFor("owner")
+	if err != nil || len(waiting) != 1 {
+		t.Fatalf("waiting=%v err=%v", waiting, err)
+	}
+	if waiting[0].Project != "global" || waiting[0].Agent != "codex" || waiting[0].Prompt != "写一下周报" {
+		t.Fatalf("task=%+v", waiting[0])
+	}
+}
+
+func TestShutdownRequiresMatchingConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	state, err := store.Open(filepath.Join(dir, "taskian.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel := &fakeTransport{}
+	cfg := &config.Config{Mode: "personal", DefaultAgent: "codex", MaxReplyChars: 6000, WaitingUserTimeout: "72h", Projects: map[string]config.ProjectConfig{}}
+	d := newDispatcher(cfg, state, channel, map[string]agent.Adapter{}, log.New(io.Discard, "", 0))
+	defer d.Close()
+	action := ""
+	d.systemRunner = func(value string) error { action = value; return nil }
+	channel.in = []message.Incoming{{ID: "shutdown-1", Channel: "test", Sender: "owner", Conversation: "owner", Body: "帮我关一下机", ReceivedAt: time.Now()}}
+	if err := d.poll(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if action != "" {
+		t.Fatal("shutdown ran without confirmation")
+	}
+	match := regexp.MustCompile(`#confirm ([0-9A-F]{6})`).FindStringSubmatch(channel.sent[len(channel.sent)-1])
+	if len(match) != 2 {
+		t.Fatalf("confirmation message=%q", channel.sent)
+	}
+	channel.in = []message.Incoming{{ID: "shutdown-2", Channel: "test", Sender: "owner", Conversation: "owner", Body: "#confirm " + match[1], ReceivedAt: time.Now()}}
+	if err := d.poll(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if action != "shutdown" {
+		t.Fatalf("action=%q", action)
+	}
+}
+
+func TestSystemActionDetectionDoesNotCaptureOrdinaryTasks(t *testing.T) {
+	if got := detectSystemAction("帮我关一下机"); got != "shutdown" {
+		t.Fatalf("action=%q", got)
+	}
+	if got := detectSystemAction("请帮我重启吧！"); got != "reboot" {
+		t.Fatalf("action=%q", got)
+	}
+	for _, text := range []string{"修复 shutdown 命令的兼容问题", "怎么关机", "不要关机", "关闭机器上的测试服务"} {
+		if got := detectSystemAction(text); got != "" {
+			t.Fatalf("text=%q action=%q", text, got)
+		}
+	}
+}
+
 func (f *fakeAgent) Resume(_ context.Context, r agent.Request) (agent.Result, error) {
 	f.resumes++
 	if r.SessionID != "session-1" {

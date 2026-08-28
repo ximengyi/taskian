@@ -28,3 +28,5 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+Taskian also uses [`github.com/mdp/qrterminal/v3`](https://github.com/mdp/qrterminal) under the MIT License to render terminal QR codes with a correct quiet zone and module polarity.

@@ -1,6 +1,7 @@
 package ilink
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -13,6 +14,21 @@ import (
 	"github.com/ximengyi/taskian/internal/config"
 	"github.com/ximengyi/taskian/internal/store"
 )
+
+func TestTerminalQRHasWhiteQuietZoneAndBlackModules(t *testing.T) {
+	var output bytes.Buffer
+	renderTerminalQR("https://example.test/taskian-login", &output)
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) < 10 {
+		t.Fatalf("terminal QR too short: %d lines", len(lines))
+	}
+	if !strings.Contains(lines[0], "█") {
+		t.Fatalf("top quiet zone is not white: %q", lines[0])
+	}
+	if !strings.Contains(output.String(), " ") {
+		t.Fatal("terminal QR has no black modules")
+	}
+}
 
 func TestPollAndSendText(t *testing.T) {
 	var sent string
