@@ -4,6 +4,9 @@ Taskian 是一个跨平台、本地优先的 AI 任务调度器。它监听 Obsi
 [Wechatian](https://github.com/laruence/wechatian) 写入的微信消息，将明确标记的任务交给
 Codex 等命令行 agent，然后把执行结果写回 `Wechatian/outbox`，由 Wechatian 发回微信。
 
+> 当前稳定版本为 0.1。腾讯 iLink 直连、Codex/Cursor 双向会话正在
+> [0.2 版本需求](docs/0.2.md)中规划。
+
 ```text
 微信 → Wechatian 每日笔记 → Taskian → Codex → Wechatian/outbox → 微信
 ```
@@ -140,6 +143,15 @@ Linux/macOS：
 - `taskian-linux-amd64`
 - `taskian-darwin-amd64`（Intel Mac）
 - `taskian-darwin-arm64`（Apple Silicon Mac）
+
+## 版本规划
+
+每个版本的需求、验收标准和 Release Note 摘要统一保存在 [`docs`](docs/README.md)
+目录，并以版本号命名，例如 [`docs/0.2.md`](docs/0.2.md)。Git Tag `0.2`
+对应需求文档 `docs/0.2.md`。
+
+Taskian 的长期定位、成本边界和相对于通用 AI Agent 平台的优势记录在
+[`docs/product-advantages.md`](docs/product-advantages.md)。
 
 ## Tag 自动发布
 
