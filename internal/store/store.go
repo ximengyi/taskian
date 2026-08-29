@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ type Store struct {
 
 type Task struct {
 	ID, SourceMessageID, Channel, Sender, Conversation string
+	ProjectID                                          int64
 	Agent, Project, ProjectPath, Prompt, Status        string
 	AgentSessionID, PendingQuestion, Result, Error     string
 	CreatedAt, UpdatedAt                               time.Time
@@ -46,6 +48,7 @@ type Message struct {
 }
 
 type Project struct {
+	ID                               int64
 	Name, Path                       string
 	CreatedAt, UpdatedAt, LastUsedAt time.Time
 }
@@ -96,19 +99,103 @@ func (s *Store) init() error {
 			FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE)`,
 		`CREATE TABLE IF NOT EXISTS channel_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS projects (
-			name TEXT PRIMARY KEY COLLATE NOCASE, path TEXT NOT NULL,
+			id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, path TEXT NOT NULL UNIQUE,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS conversation_preferences (
 			channel TEXT NOT NULL, conversation TEXT NOT NULL, current_project TEXT NOT NULL DEFAULT '',
 			default_agent TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
 			PRIMARY KEY(channel, conversation))`,
+		`CREATE TABLE IF NOT EXISTS global_preferences (
+			id INTEGER PRIMARY KEY CHECK(id=1), active_project_id INTEGER, updated_at TEXT NOT NULL,
+			FOREIGN KEY(active_project_id) REFERENCES projects(id) ON DELETE SET NULL)`,
+		`CREATE TABLE IF NOT EXISTS sender_preferences (
+			sender TEXT PRIMARY KEY, active_project_id INTEGER, updated_at TEXT NOT NULL,
+			FOREIGN KEY(active_project_id) REFERENCES projects(id) ON DELETE SET NULL)`,
+		`CREATE TABLE IF NOT EXISTS selection_contexts (
+			channel TEXT NOT NULL, sender TEXT NOT NULL, kind TEXT NOT NULL, expires_at TEXT NOT NULL,
+			PRIMARY KEY(channel,sender))`,
+		`CREATE TABLE IF NOT EXISTS channel_bindings (
+			channel TEXT NOT NULL, platform_user_id TEXT NOT NULL, role TEXT NOT NULL, created_at TEXT NOT NULL,
+			PRIMARY KEY(channel,platform_user_id))`,
+	}
+	if err := s.migrateProjects(); err != nil {
+		return err
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {
 			return fmt.Errorf("初始化 SQLite: %w", err)
 		}
 	}
+	if err := s.addColumnIfMissing("tasks", "project_id", `ALTER TABLE tasks ADD COLUMN project_id INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE tasks SET project_id=COALESCE((SELECT id FROM projects WHERE projects.name=tasks.project COLLATE NOCASE),0) WHERE project_id=0`); err != nil {
+		return fmt.Errorf("回填任务项目 ID: %w", err)
+	}
 	return nil
+}
+
+func (s *Store) migrateProjects() error {
+	rows, err := s.db.Query(`PRAGMA table_info(projects)`)
+	if err != nil {
+		return err
+	}
+	hasID, exists := false, false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		exists = true
+		if name == "id" {
+			hasID = true
+		}
+	}
+	_ = rows.Close()
+	if !exists || hasID {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	steps := []string{
+		`ALTER TABLE projects RENAME TO projects_v04`,
+		`CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_used_at TEXT NOT NULL)`,
+		`INSERT INTO projects(name,path,created_at,updated_at,last_used_at) SELECT name,path,created_at,updated_at,last_used_at FROM projects_v04 ORDER BY created_at,name`,
+		`DROP TABLE projects_v04`,
+	}
+	for _, step := range steps {
+		if _, err := tx.Exec(step); err != nil {
+			return fmt.Errorf("迁移 0.4 项目表: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) addColumnIfMissing(table, column, statement string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	_, err = s.db.Exec(statement)
+	return err
 }
 
 func (s *Store) RecoverInterrupted() error {
@@ -143,8 +230,8 @@ func (s *Store) CreateTask(t Task) (Task, error) {
 	if t.Status == "" {
 		t.Status = StatusQueued
 	}
-	_, err := s.db.Exec(`INSERT INTO tasks(id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.SourceMessageID, t.Channel, t.Sender, t.Conversation, t.Agent, t.Project, t.ProjectPath, t.Prompt, t.Status, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	_, err := s.db.Exec(`INSERT INTO tasks(id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,created_at,updated_at,project_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.SourceMessageID, t.Channel, t.Sender, t.Conversation, t.Agent, t.Project, t.ProjectPath, t.Prompt, t.Status, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), t.ProjectID)
 	if err != nil {
 		return Task{}, err
 	}
@@ -178,12 +265,12 @@ func (s *Store) AddMessage(taskID, direction, kind, content, externalID string) 
 }
 
 func (s *Store) Task(id string) (Task, error) {
-	row := s.db.QueryRow(`SELECT id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,agent_session_id,pending_question,result,error,created_at,updated_at FROM tasks WHERE id=?`, normalizeID(id))
+	row := s.db.QueryRow(`SELECT id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,agent_session_id,pending_question,result,error,created_at,updated_at,project_id FROM tasks WHERE id=?`, normalizeID(id))
 	return scanTask(row)
 }
 
 func (s *Store) WaitingFor(sender string) ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,agent_session_id,pending_question,result,error,created_at,updated_at FROM tasks WHERE sender=? AND status=? ORDER BY updated_at`, sender, StatusWaitingUser)
+	rows, err := s.db.Query(`SELECT id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,agent_session_id,pending_question,result,error,created_at,updated_at,project_id FROM tasks WHERE sender=? AND status=? ORDER BY updated_at`, sender, StatusWaitingUser)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +287,7 @@ func (s *Store) WaitingFor(sender string) ([]Task, error) {
 }
 
 func (s *Store) ActiveFor(sender string) ([]Task, error) {
-	query := `SELECT id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,agent_session_id,pending_question,result,error,created_at,updated_at FROM tasks WHERE sender=? AND status IN (?,?,?,?,?) ORDER BY updated_at DESC`
+	query := `SELECT id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,agent_session_id,pending_question,result,error,created_at,updated_at,project_id FROM tasks WHERE sender=? AND status IN (?,?,?,?,?) ORDER BY updated_at DESC`
 	rows, err := s.db.Query(query, sender, StatusQueued, StatusRunning, StatusWaitingUser, StatusResuming, StatusResumeFailed)
 	if err != nil {
 		return nil, err
@@ -218,7 +305,7 @@ func (s *Store) ActiveFor(sender string) ([]Task, error) {
 }
 
 func (s *Store) ExpireWaiting(before time.Time) ([]Task, error) {
-	rows, err := s.db.Query(`SELECT id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,agent_session_id,pending_question,result,error,created_at,updated_at FROM tasks WHERE status=? AND updated_at<?`, StatusWaitingUser, before.UTC().Format(time.RFC3339Nano))
+	rows, err := s.db.Query(`SELECT id,source_message_id,channel,sender,conversation,agent,project,project_path,prompt,status,agent_session_id,pending_question,result,error,created_at,updated_at,project_id FROM tasks WHERE status=? AND updated_at<?`, StatusWaitingUser, before.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}
@@ -263,17 +350,43 @@ func (s *Store) ResetIlinkState() error {
 }
 
 func (s *Store) PutProject(name, path string) error {
+	_, err := s.PutProjectRecord(name, path)
+	return err
+}
+
+func (s *Store) PutProjectRecord(name, path string) (Project, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	now := nowText()
 	_, err := s.db.Exec(`INSERT INTO projects(name,path,created_at,updated_at,last_used_at) VALUES(?,?,?,?,?)
 		ON CONFLICT(name) DO UPDATE SET path=excluded.path,updated_at=excluded.updated_at`, name, path, now, now, now)
-	return err
+	if err != nil {
+		return Project{}, err
+	}
+	return s.Project(name)
 }
 
-func (s *Store) Project(name string) (Project, error) {
+func (s *Store) Project(reference string) (Project, error) {
 	var p Project
 	var created, updated, used string
-	err := s.db.QueryRow(`SELECT name,path,created_at,updated_at,last_used_at FROM projects WHERE name=?`, strings.ToLower(strings.TrimSpace(name))).Scan(&p.Name, &p.Path, &created, &updated, &used)
+	reference = strings.TrimSpace(reference)
+	query, argument := `SELECT id,name,path,created_at,updated_at,last_used_at FROM projects WHERE name=?`, any(strings.ToLower(reference))
+	if id, err := strconv.ParseInt(reference, 10, 64); err == nil && id > 0 {
+		query, argument = `SELECT id,name,path,created_at,updated_at,last_used_at FROM projects WHERE id=?`, id
+	}
+	err := s.db.QueryRow(query, argument).Scan(&p.ID, &p.Name, &p.Path, &created, &updated, &used)
+	if err != nil {
+		return p, err
+	}
+	p.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	p.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	p.LastUsedAt, _ = time.Parse(time.RFC3339Nano, used)
+	return p, nil
+}
+
+func (s *Store) ProjectByPath(path string) (Project, error) {
+	var p Project
+	var created, updated, used string
+	err := s.db.QueryRow(`SELECT id,name,path,created_at,updated_at,last_used_at FROM projects WHERE path=?`, path).Scan(&p.ID, &p.Name, &p.Path, &created, &updated, &used)
 	if err != nil {
 		return p, err
 	}
@@ -284,7 +397,7 @@ func (s *Store) Project(name string) (Project, error) {
 }
 
 func (s *Store) Projects() ([]Project, error) {
-	rows, err := s.db.Query(`SELECT name,path,created_at,updated_at,last_used_at FROM projects ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id,name,path,created_at,updated_at,last_used_at FROM projects ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +406,7 @@ func (s *Store) Projects() ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		var created, updated, used string
-		if err := rows.Scan(&p.Name, &p.Path, &created, &updated, &used); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &created, &updated, &used); err != nil {
 			return nil, err
 		}
 		p.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -304,14 +417,17 @@ func (s *Store) Projects() ([]Project, error) {
 	return result, rows.Err()
 }
 
-func (s *Store) RemoveProject(name string) error {
-	name = strings.ToLower(strings.TrimSpace(name))
+func (s *Store) RemoveProject(reference string) error {
+	p, err := s.Project(reference)
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`DELETE FROM projects WHERE name=?`, name)
+	result, err := tx.Exec(`DELETE FROM projects WHERE id=?`, p.ID)
 	if err != nil {
 		return err
 	}
@@ -319,20 +435,24 @@ func (s *Store) RemoveProject(name string) error {
 	if count == 0 {
 		return sql.ErrNoRows
 	}
-	if _, err := tx.Exec(`UPDATE conversation_preferences SET current_project='',updated_at=? WHERE current_project=?`, nowText(), name); err != nil {
+	if _, err := tx.Exec(`UPDATE conversation_preferences SET current_project='',updated_at=? WHERE current_project=?`, nowText(), p.Name); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) RenameProject(oldName, newName string) error {
-	oldName, newName = strings.ToLower(strings.TrimSpace(oldName)), strings.ToLower(strings.TrimSpace(newName))
+func (s *Store) RenameProject(reference, newName string) error {
+	p, err := s.Project(reference)
+	if err != nil {
+		return err
+	}
+	newName = strings.ToLower(strings.TrimSpace(newName))
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE projects SET name=?,updated_at=? WHERE name=?`, newName, nowText(), oldName)
+	result, err := tx.Exec(`UPDATE projects SET name=?,updated_at=? WHERE id=?`, newName, nowText(), p.ID)
 	if err != nil {
 		return err
 	}
@@ -340,14 +460,110 @@ func (s *Store) RenameProject(oldName, newName string) error {
 	if count == 0 {
 		return sql.ErrNoRows
 	}
-	if _, err := tx.Exec(`UPDATE conversation_preferences SET current_project=?,updated_at=? WHERE current_project=?`, newName, nowText(), oldName); err != nil {
+	if _, err := tx.Exec(`UPDATE conversation_preferences SET current_project=?,updated_at=? WHERE current_project=?`, newName, nowText(), p.Name); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) TouchProject(name string) error {
-	_, err := s.db.Exec(`UPDATE projects SET last_used_at=? WHERE name=?`, nowText(), strings.ToLower(strings.TrimSpace(name)))
+func (s *Store) TouchProject(reference string) error {
+	p, err := s.Project(reference)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE projects SET last_used_at=? WHERE id=?`, nowText(), p.ID)
+	return err
+}
+
+func (s *Store) UpdateProjectPath(reference, path string) (Project, error) {
+	p, err := s.Project(reference)
+	if err != nil {
+		return Project{}, err
+	}
+	if _, err := s.db.Exec(`UPDATE projects SET path=?,updated_at=? WHERE id=?`, path, nowText(), p.ID); err != nil {
+		return Project{}, err
+	}
+	return s.Project(strconv.FormatInt(p.ID, 10))
+}
+
+func (s *Store) SetActiveProject(id int64) error {
+	_, err := s.db.Exec(`INSERT INTO global_preferences(id,active_project_id,updated_at) VALUES(1,?,?)
+		ON CONFLICT(id) DO UPDATE SET active_project_id=excluded.active_project_id,updated_at=excluded.updated_at`, id, nowText())
+	return err
+}
+
+func (s *Store) ActiveProject() (Project, error) {
+	var id sql.NullInt64
+	err := s.db.QueryRow(`SELECT active_project_id FROM global_preferences WHERE id=1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) || !id.Valid || id.Int64 == 0 {
+		return Project{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return Project{}, err
+	}
+	return s.Project(strconv.FormatInt(id.Int64, 10))
+}
+
+func (s *Store) SetSenderProject(sender string, id int64) error {
+	_, err := s.db.Exec(`INSERT INTO sender_preferences(sender,active_project_id,updated_at) VALUES(?,?,?)
+		ON CONFLICT(sender) DO UPDATE SET active_project_id=excluded.active_project_id,updated_at=excluded.updated_at`, sender, id, nowText())
+	return err
+}
+
+func (s *Store) SenderProject(sender string) (Project, error) {
+	var id sql.NullInt64
+	err := s.db.QueryRow(`SELECT active_project_id FROM sender_preferences WHERE sender=?`, sender).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) || !id.Valid || id.Int64 == 0 {
+		return Project{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return Project{}, err
+	}
+	return s.Project(strconv.FormatInt(id.Int64, 10))
+}
+
+func (s *Store) SetSelectionContext(channel, sender, kind string, expires time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO selection_contexts(channel,sender,kind,expires_at) VALUES(?,?,?,?)
+		ON CONFLICT(channel,sender) DO UPDATE SET kind=excluded.kind,expires_at=excluded.expires_at`, channel, sender, kind, expires.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) SelectionContext(channel, sender string, now time.Time) (string, bool, error) {
+	var kind, expires string
+	err := s.db.QueryRow(`SELECT kind,expires_at FROM selection_contexts WHERE channel=? AND sender=?`, channel, sender).Scan(&kind, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	deadline, _ := time.Parse(time.RFC3339Nano, expires)
+	if !deadline.After(now.UTC()) {
+		_, _ = s.db.Exec(`DELETE FROM selection_contexts WHERE channel=? AND sender=?`, channel, sender)
+		return "", false, nil
+	}
+	return kind, true, nil
+}
+
+func (s *Store) ClearSelectionContext(channel, sender string) error {
+	_, err := s.db.Exec(`DELETE FROM selection_contexts WHERE channel=? AND sender=?`, channel, sender)
+	return err
+}
+
+func (s *Store) PutChannelBinding(channel, userID, role string) error {
+	_, err := s.db.Exec(`INSERT INTO channel_bindings(channel,platform_user_id,role,created_at) VALUES(?,?,?,?)
+		ON CONFLICT(channel,platform_user_id) DO UPDATE SET role=excluded.role`, channel, userID, role, nowText())
+	return err
+}
+
+func (s *Store) ChannelBinding(channel, userID string) (string, error) {
+	var role string
+	err := s.db.QueryRow(`SELECT role FROM channel_bindings WHERE channel=? AND platform_user_id=?`, channel, userID).Scan(&role)
+	return role, err
+}
+
+func (s *Store) DeleteChannelBindings(channel string) error {
+	_, err := s.db.Exec(`DELETE FROM channel_bindings WHERE channel=?`, channel)
 	return err
 }
 
@@ -364,6 +580,15 @@ func (s *Store) ConversationProject(channel, conversation string) (string, error
 		return "", nil
 	}
 	return project, err
+}
+
+func (s *Store) MostRecentConversationProject() (Project, error) {
+	var reference string
+	err := s.db.QueryRow(`SELECT current_project FROM conversation_preferences WHERE current_project<>'' ORDER BY updated_at DESC LIMIT 1`).Scan(&reference)
+	if err != nil {
+		return Project{}, err
+	}
+	return s.Project(reference)
 }
 
 func (s *Store) Counts() (map[string]int, error) {
@@ -419,7 +644,7 @@ type scanner interface{ Scan(...any) error }
 func scanTask(row scanner) (Task, error) {
 	var t Task
 	var created, updated string
-	err := row.Scan(&t.ID, &t.SourceMessageID, &t.Channel, &t.Sender, &t.Conversation, &t.Agent, &t.Project, &t.ProjectPath, &t.Prompt, &t.Status, &t.AgentSessionID, &t.PendingQuestion, &t.Result, &t.Error, &created, &updated)
+	err := row.Scan(&t.ID, &t.SourceMessageID, &t.Channel, &t.Sender, &t.Conversation, &t.Agent, &t.Project, &t.ProjectPath, &t.Prompt, &t.Status, &t.AgentSessionID, &t.PendingQuestion, &t.Result, &t.Error, &created, &updated, &t.ProjectID)
 	if err != nil {
 		return t, err
 	}

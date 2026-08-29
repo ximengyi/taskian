@@ -18,7 +18,8 @@ type Config struct {
 	DefaultProject         string                   `json:"default_project,omitempty"`
 	DataDir                string                   `json:"data_dir,omitempty"`
 	DatabasePath           string                   `json:"database_path,omitempty"`
-	Channel                ChannelConfig            `json:"channel,omitempty"`
+	Channel                *ChannelConfig           `json:"channel,omitempty"`
+	Channels               []ChannelConfig          `json:"channels,omitempty"`
 	PollInterval           string                   `json:"poll_interval,omitempty"`
 	MaxReplyChars          int                      `json:"max_reply_chars,omitempty"`
 	MaxConcurrentTasks     int                      `json:"max_concurrent_tasks,omitempty"`
@@ -46,6 +47,10 @@ type ChannelConfig struct {
 	AllowedSenders  []string `json:"allowed_senders,omitempty"`
 	ChannelVersion  string   `json:"channel_version,omitempty"`
 	LongPollTimeout string   `json:"long_poll_timeout,omitempty"`
+	AppID           string   `json:"app_id,omitempty"`
+	AppSecret       string   `json:"app_secret,omitempty"`
+	OwnerID         string   `json:"owner_id,omitempty"`
+	RequireMention  *bool    `json:"require_mention,omitempty"`
 }
 
 type AgentConfig struct {
@@ -96,7 +101,7 @@ func WritePersonal(path string) error {
 	enabled := true
 	cfg := Config{
 		Mode: "personal", DefaultAgent: "codex", DataDir: "~/.taskian", DatabasePath: "~/.taskian/taskian.db",
-		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.4.2", LongPollTimeout: "35s"},
+		Channels:     []ChannelConfig{{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.5", LongPollTimeout: "35s"}},
 		PollInterval: "10s", MaxReplyChars: 6000, MaxConcurrentTasks: 2, WaitingUserTimeout: "72h",
 		Health: HealthConfig{Enabled: &enabled, Interval: "5m"}, Agents: map[string]AgentConfig{}, Projects: map[string]ProjectConfig{},
 	}
@@ -119,14 +124,26 @@ func WritePersonal(path string) error {
 }
 
 func (c *Config) Validate() error {
-	if c.Channel.Type != "ilink" && c.Channel.Type != "wechatian-files" {
-		return fmt.Errorf("channel.type 必须是 ilink 或 wechatian-files")
-	}
-	if c.Channel.Type == "wechatian-files" && (c.VaultPath == "" || c.InboxDir == "" || c.OutboxDir == "") {
-		return fmt.Errorf("wechatian-files 通道需要 vault_path、inbox_dir 和 outbox_dir")
-	}
-	if c.Channel.Type == "ilink" && c.Channel.StatePath == "" {
-		return fmt.Errorf("ilink 通道需要 state_path")
+	seenChannels := map[string]bool{}
+	for _, channel := range c.Channels {
+		if channel.Type != "ilink" && channel.Type != "wechatian-files" && channel.Type != "feishu" {
+			return fmt.Errorf("channel.type 必须是 ilink、feishu 或 wechatian-files")
+		}
+		if seenChannels[channel.Type] {
+			return fmt.Errorf("通道 %s 只能配置一次", channel.Type)
+		}
+		seenChannels[channel.Type] = true
+		if channel.Type == "wechatian-files" && (c.VaultPath == "" || c.InboxDir == "" || c.OutboxDir == "") {
+			return fmt.Errorf("wechatian-files 通道需要 vault_path、inbox_dir 和 outbox_dir")
+		}
+		if (channel.Type == "ilink" || channel.Type == "feishu") && channel.StatePath == "" {
+			return fmt.Errorf("%s 通道需要 state_path", channel.Type)
+		}
+		if channel.LongPollTimeout != "" {
+			if _, err := time.ParseDuration(channel.LongPollTimeout); err != nil {
+				return fmt.Errorf("channel.long_poll_timeout 无效: %w", err)
+			}
+		}
 	}
 	if _, err := time.ParseDuration(c.PollInterval); err != nil {
 		return fmt.Errorf("poll_interval 无效: %w", err)
@@ -138,9 +155,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("health.interval 无效: %w", err)
 	} else if duration <= 0 {
 		return fmt.Errorf("health.interval 必须大于 0")
-	}
-	if _, err := time.ParseDuration(c.Channel.LongPollTimeout); err != nil {
-		return fmt.Errorf("channel.long_poll_timeout 无效: %w", err)
 	}
 	if c.Mode != "personal" && c.Mode != "controlled" {
 		return fmt.Errorf("mode 必须是 personal 或 controlled")
@@ -189,7 +203,11 @@ func (c *Config) WaitingDuration() time.Duration {
 	return duration
 }
 func (c *Config) LongPollDuration() time.Duration {
-	duration, _ := time.ParseDuration(c.Channel.LongPollTimeout)
+	channel, ok := c.ChannelOf("ilink")
+	if !ok {
+		return 0
+	}
+	duration, _ := time.ParseDuration(channel.LongPollTimeout)
 	return duration
 }
 func (c *Config) HealthDuration() time.Duration {
@@ -197,6 +215,75 @@ func (c *Config) HealthDuration() time.Duration {
 	return duration
 }
 func (c *Config) HealthEnabled() bool { return c.Health.Enabled == nil || *c.Health.Enabled }
+
+func (c *Config) ChannelOf(channelType string) (ChannelConfig, bool) {
+	for _, channel := range c.Channels {
+		if channel.Type == channelType {
+			return channel, true
+		}
+	}
+	return ChannelConfig{}, false
+}
+
+// EnsureChannel upgrades either the legacy single-channel JSON shape or the
+// 0.5 channels array without rewriting unrelated user configuration.
+func EnsureChannel(path string, wanted ChannelConfig) error {
+	path = ExpandPath(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var channels []ChannelConfig
+	if value := raw["channels"]; len(value) > 0 {
+		if err := json.Unmarshal(value, &channels); err != nil {
+			return err
+		}
+	} else if value := raw["channel"]; len(value) > 0 {
+		var legacy ChannelConfig
+		if err := json.Unmarshal(value, &legacy); err != nil {
+			return err
+		}
+		if legacy.Type != "" {
+			channels = append(channels, legacy)
+		}
+	}
+	updated := false
+	for index := range channels {
+		if channels[index].Type == wanted.Type {
+			if wanted.StatePath != "" {
+				channels[index].StatePath = wanted.StatePath
+			}
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		channels = append(channels, wanted)
+	}
+	encoded, err := json.Marshal(channels)
+	if err != nil {
+		return err
+	}
+	raw["channels"] = encoded
+	delete(raw, "channel")
+	result, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, append(result, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
 
 func (p ProjectConfig) Allows(agent string) bool {
 	for _, allowed := range p.AllowedAgents {
@@ -212,7 +299,7 @@ func Example() Config {
 	return Config{
 		Mode: "controlled", DefaultAgent: "codex",
 		DataDir: "~/.taskian", DatabasePath: "~/.taskian/taskian.db",
-		Channel:      ChannelConfig{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.4.2", LongPollTimeout: "35s"},
+		Channels:     []ChannelConfig{{Type: "ilink", BaseURL: DefaultIlinkBaseURL, StatePath: "~/.taskian/ilink.json", ChannelVersion: "taskian/0.5", LongPollTimeout: "35s"}},
 		PollInterval: "10s", MaxReplyChars: 6000, MaxConcurrentTasks: 2, WaitingUserTimeout: "72h",
 		Health: HealthConfig{Enabled: &enabled, Interval: "5m"},
 		Agents: map[string]AgentConfig{
@@ -240,25 +327,46 @@ func applyDefaults(c *Config) {
 	if c.DatabasePath == "" {
 		c.DatabasePath = filepath.Join(c.DataDir, "taskian.db")
 	}
-	if c.Channel.Type == "" {
+	if len(c.Channels) == 0 && (c.Channel == nil || c.Channel.Type == "") {
+		legacy := ChannelConfig{}
 		if c.VaultPath != "" {
-			c.Channel.Type = "wechatian-files"
+			legacy.Type = "wechatian-files"
 		} else {
-			c.Channel.Type = "ilink"
+			legacy.Type = "ilink"
+		}
+		c.Channel = &legacy
+	}
+	if len(c.Channels) == 0 {
+		c.Channels = []ChannelConfig{*c.Channel}
+	}
+	for index := range c.Channels {
+		channel := &c.Channels[index]
+		if channel.Type == "ilink" {
+			if channel.BaseURL == "" {
+				channel.BaseURL = DefaultIlinkBaseURL
+			}
+			if channel.StatePath == "" {
+				channel.StatePath = filepath.Join(c.DataDir, "ilink.json")
+			}
+			if channel.LongPollTimeout == "" {
+				channel.LongPollTimeout = "35s"
+			}
+		} else if channel.Type == "feishu" {
+			if channel.StatePath == "" {
+				channel.StatePath = filepath.Join(c.DataDir, "feishu.json")
+			}
+			if channel.AppID == "" {
+				channel.AppID = os.Getenv("FEISHU_APP_ID")
+			}
+			if channel.AppSecret == "" {
+				channel.AppSecret = os.Getenv("FEISHU_APP_SECRET")
+			}
+		}
+		if channel.ChannelVersion == "" {
+			channel.ChannelVersion = "taskian/0.5"
 		}
 	}
-	if c.Channel.BaseURL == "" {
-		c.Channel.BaseURL = DefaultIlinkBaseURL
-	}
-	if c.Channel.StatePath == "" {
-		c.Channel.StatePath = filepath.Join(c.DataDir, "ilink.json")
-	}
-	if c.Channel.ChannelVersion == "" {
-		c.Channel.ChannelVersion = "taskian/0.4.2"
-	}
-	if c.Channel.LongPollTimeout == "" {
-		c.Channel.LongPollTimeout = "35s"
-	}
+	c.Channel = &c.Channels[0]
 	if c.InboxDir == "" {
 		c.InboxDir = "Wechatian"
 	}
@@ -315,9 +423,12 @@ func applyDefaults(c *Config) {
 func resolvePaths(c *Config) {
 	c.DataDir = ExpandPath(c.DataDir)
 	c.DatabasePath = ExpandPath(c.DatabasePath)
-	c.Channel.StatePath = ExpandPath(c.Channel.StatePath)
+	for index := range c.Channels {
+		c.Channels[index].StatePath = ExpandPath(c.Channels[index].StatePath)
+	}
+	c.Channel = &c.Channels[0]
 	c.VaultPath = ExpandPath(c.VaultPath)
-	if c.Channel.Type == "wechatian-files" {
+	if c.Channel != nil && c.Channel.Type == "wechatian-files" {
 		c.InboxDir = resolveUnder(c.VaultPath, c.InboxDir)
 		c.OutboxDir = resolveUnder(c.VaultPath, c.OutboxDir)
 	}

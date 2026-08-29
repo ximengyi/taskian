@@ -95,3 +95,28 @@ func TestWritePersonalConfigWithoutProjects(t *testing.T) {
 		t.Fatal("expected existing config refusal")
 	}
 }
+
+func TestEnsureChannelUpgradesLegacyConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{"mode":"personal","channel":{"type":"ilink","state_path":"~/.taskian/ilink.json"},"agents":{},"projects":{}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "feishu.json")
+	if err := os.WriteFile(statePath, []byte(`{"app_id":"cli","app_secret":"secret"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureChannel(path, ChannelConfig{Type: "feishu", StatePath: statePath}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Channels) != 2 || cfg.Channels[0].Type != "ilink" {
+		t.Fatalf("channels=%+v", cfg.Channels)
+	}
+	if _, ok := cfg.ChannelOf("feishu"); !ok {
+		t.Fatal("feishu channel missing")
+	}
+}

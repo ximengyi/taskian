@@ -21,6 +21,7 @@ import (
 	"github.com/ximengyi/taskian/internal/agent"
 	"github.com/ximengyi/taskian/internal/app"
 	"github.com/ximengyi/taskian/internal/config"
+	"github.com/ximengyi/taskian/internal/feishu"
 	"github.com/ximengyi/taskian/internal/ilink"
 	"github.com/ximengyi/taskian/internal/service"
 	"github.com/ximengyi/taskian/internal/store"
@@ -74,7 +75,7 @@ func run(args []string) error {
 			if err := dispatcher.Check(); err != nil {
 				return err
 			}
-			fmt.Printf("配置有效：通道=%s，%d 个 Agent，%d 个项目\n", cfg.Channel.Type, len(cfg.Agents), len(cfg.Projects))
+			fmt.Printf("配置有效：通道=%s，%d 个 Agent，%d 个项目\n", channelNames(cfg), len(cfg.Agents), len(cfg.Projects))
 			return nil
 		}
 		if command == "once" {
@@ -85,6 +86,8 @@ func run(args []string) error {
 		return dispatcher.Serve(ctx)
 	case "ilink":
 		return runIlink(args)
+	case "feishu":
+		return runFeishu(args)
 	case "agents":
 		return runAgents(args)
 	case "launch", "init":
@@ -134,11 +137,15 @@ func runLauncher(args []string) error {
 	if err != nil {
 		return err
 	}
-	credentials, err := ilink.LoadCredentials(cfg.Channel.StatePath)
+	ilinkChannel, hasIlink := cfg.ChannelOf("ilink")
+	credentials := ilink.Credentials{}
+	if hasIlink {
+		credentials, err = ilink.LoadCredentials(ilinkChannel.StatePath)
+	}
 	if err != nil {
 		return err
 	}
-	if credentials.Token == "" {
+	if hasIlink && credentials.Token == "" {
 		fmt.Println("\n请使用微信扫描下面的二维码绑定 Taskian：")
 		if err := runIlink([]string{"login", "-config", *configPath}); err != nil {
 			return err
@@ -281,14 +288,15 @@ func runIlink(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Channel.Type != "ilink" {
-		return fmt.Errorf("当前配置的 channel.type 不是 ilink")
+	channelCfg, ok := cfg.ChannelOf("ilink")
+	if !ok {
+		return fmt.Errorf("当前配置没有启用 ilink 通道")
 	}
 	switch operation {
 	case "login":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		credentials, err := ilink.Login(ctx, cfg.Channel)
+		credentials, err := ilink.Login(ctx, channelCfg)
 		if err != nil {
 			return err
 		}
@@ -303,7 +311,7 @@ func runIlink(args []string) error {
 		fmt.Printf("iLink 登录成功：bot_id=%s，绑定用户=%s\n", credentials.BotID, credentials.ScannedUser)
 		return nil
 	case "status":
-		credentials, err := ilink.LoadCredentials(cfg.Channel.StatePath)
+		credentials, err := ilink.LoadCredentials(channelCfg.StatePath)
 		if err != nil {
 			return err
 		}
@@ -314,7 +322,7 @@ func runIlink(args []string) error {
 		fmt.Printf("iLink：已登录\nbot_id：%s\n绑定用户：%s\n网关：%s\n", credentials.BotID, credentials.ScannedUser, credentials.BaseURL)
 		return nil
 	case "logout":
-		if err := ilink.Logout(cfg.Channel.StatePath); err != nil {
+		if err := ilink.Logout(channelCfg.StatePath); err != nil {
 			return err
 		}
 		state, e := store.Open(cfg.DatabasePath)
@@ -332,6 +340,91 @@ func runIlink(args []string) error {
 	}
 }
 
+func runFeishu(args []string) error {
+	operation := "status"
+	if len(args) > 0 && !startsFlag(args[0]) {
+		operation, args = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("feishu "+operation, flag.ContinueOnError)
+	configPath := fs.String("config", defaultConfigPath(), "配置文件路径")
+	appID := fs.String("app-id", "", "飞书应用 App ID（手工配置）")
+	appSecret := fs.String("app-secret", "", "飞书应用 App Secret（手工配置）")
+	manual := fs.Bool("manual", false, "使用已有飞书企业自建应用")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	channelCfg, exists := cfg.ChannelOf("feishu")
+	if !exists {
+		channelCfg = config.ChannelConfig{Type: "feishu", StatePath: filepath.Join(cfg.DataDir, "feishu.json")}
+	}
+	switch operation {
+	case "setup":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		var credentials feishu.Credentials
+		if *manual || *appID != "" || *appSecret != "" {
+			credentials, err = feishu.SetupManual(channelCfg.StatePath, firstNonEmpty(*appID, os.Getenv("FEISHU_APP_ID")), firstNonEmpty(*appSecret, os.Getenv("FEISHU_APP_SECRET")))
+		} else {
+			credentials, err = feishu.SetupAutomatic(ctx, channelCfg.StatePath, nil)
+		}
+		if err != nil {
+			return fmt.Errorf("配置飞书: %w", err)
+		}
+		if err := config.EnsureChannel(*configPath, config.ChannelConfig{Type: "feishu", StatePath: channelCfg.StatePath}); err != nil {
+			return fmt.Errorf("启用飞书通道: %w", err)
+		}
+		fmt.Println("\n✅ 飞书通道已写入 Taskian 配置。")
+		if credentials.OwnerID != "" {
+			fmt.Printf("已绑定飞书用户：%s\n", credentials.OwnerID)
+		} else {
+			fmt.Printf("启动或重启 Taskian 后，请在飞书中向机器人发送：绑定 %s\n绑定码有效期至：%s\n", credentials.BindCode, credentials.BindExpires.Local().Format("2006-01-02 15:04:05"))
+		}
+		fmt.Println("请确保应用已发布，并启用了“接收消息”事件和长连接模式。")
+		return nil
+	case "status":
+		credentials, loadErr := feishu.LoadCredentials(channelCfg.StatePath)
+		if loadErr != nil {
+			return loadErr
+		}
+		if credentials.AppID == "" {
+			credentials.AppID = channelCfg.AppID
+		}
+		if credentials.OwnerID == "" {
+			credentials.OwnerID = channelCfg.OwnerID
+		}
+		if credentials.AppID == "" {
+			fmt.Println("飞书：未配置。运行 taskian feishu setup 开始配置。")
+			return nil
+		}
+		binding := "等待绑定"
+		if credentials.OwnerID != "" {
+			binding = credentials.OwnerID
+		}
+		fmt.Printf("飞书：已配置\nApp ID：%s\n绑定用户：%s\n配置文件：%s\n", credentials.AppID, binding, channelCfg.StatePath)
+		return nil
+	case "logout":
+		if err := feishu.Logout(channelCfg.StatePath); err != nil {
+			return err
+		}
+		state, stateErr := store.Open(cfg.DatabasePath)
+		if stateErr == nil {
+			stateErr = state.DeleteChannelBindings("feishu")
+			_ = state.Close()
+		}
+		if stateErr != nil {
+			return stateErr
+		}
+		fmt.Println("飞书凭据和本机绑定已清除；通道仍保留在配置中。")
+		return nil
+	default:
+		return fmt.Errorf("未知 feishu 命令 %q；可用命令：setup、status、logout", operation)
+	}
+}
+
 func showStatus(cfg *config.Config) error {
 	state, err := store.Open(cfg.DatabasePath)
 	if err != nil {
@@ -342,7 +435,7 @@ func showStatus(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Taskian %s\n通道：%s\n状态库：%s\n", version, cfg.Channel.Type, cfg.DatabasePath)
+	fmt.Printf("Taskian %s\n通道：%s\n状态库：%s\n", version, channelNames(cfg), cfg.DatabasePath)
 	keys := make([]string, 0, len(counts))
 	for key := range counts {
 		keys = append(keys, key)
@@ -359,6 +452,21 @@ func showStatus(cfg *config.Config) error {
 }
 
 func startsFlag(value string) bool { return len(value) > 0 && value[0] == '-' }
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+func channelNames(cfg *config.Config) string {
+	names := make([]string, 0, len(cfg.Channels))
+	for _, channel := range cfg.Channels {
+		names = append(names, channel.Type)
+	}
+	return strings.Join(names, ", ")
+}
 func defaultConfigPath() string {
 	if value := os.Getenv("TASKIAN_CONFIG"); value != "" {
 		return value
@@ -370,7 +478,7 @@ func defaultConfigPath() string {
 	return filepath.Join(home, ".taskian", "config.json")
 }
 func printHelp() {
-	fmt.Print(`Taskian - 微信与本地编程 Agent 的双向任务调度器
+	fmt.Print(`Taskian - 微信/飞书与本地编程 Agent 的双向任务调度器
 
 用法：
   taskian serve [-config FILE]          持续运行
@@ -383,7 +491,10 @@ func printHelp() {
   taskian ilink login [-config FILE]    在终端扫码登录 iLink
   taskian ilink status [-config FILE]   查看 iLink 绑定状态
   taskian ilink logout [-config FILE]   清除 iLink 登录
-  taskian example-config                输出 0.4.2 示例配置
+  taskian feishu setup [-config FILE]   配置并绑定飞书长连接
+  taskian feishu status [-config FILE]  查看飞书配置和绑定状态
+  taskian feishu logout [-config FILE]  清除飞书凭据与绑定
+  taskian example-config                输出 0.5 示例配置
   taskian version                       显示版本
 `)
 }

@@ -4,14 +4,14 @@
 
 ## 一句话定位
 
-> Taskian 是连接微信与本地编程 Agent 的轻量、安全、可恢复的双向任务调度器，不在用户和 Agent 之间增加第二个大模型。
+> Taskian 是连接微信、飞书与本地编程 Agent 的轻量、安全、可恢复的双向任务调度器，不在用户和 Agent 之间增加第二个大模型。
 
 ## 核心价值
 
 Taskian 解决的不是“再造一个 AI”，而是让用户能够离开电脑后，继续安全地控制已经安装和登录的 Codex、Cursor 等编程 Agent：
 
 ```text
-用户微信 ⇄ Taskian ⇄ Codex / Cursor / 其他 Agent ⇄ 代码仓库
+用户微信/飞书 ⇄ Taskian ⇄ Codex / Cursor / 其他 Agent ⇄ 代码仓库
 ```
 
 Taskian 负责：

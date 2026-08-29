@@ -135,6 +135,25 @@ func ParseCommand(in Incoming) (Command, error) {
 		}
 		return Command{Kind: CommandHelp, Text: topic}, nil
 	}
+	switch lowerText {
+	case "当前项目", "查询当前项目", "项目状态", "project current":
+		return Command{Kind: CommandProject, Action: "current"}, nil
+	case "项目列表", "所有项目", "列出项目", "projects", "project list":
+		return Command{Kind: CommandProject, Action: "list"}, nil
+	}
+	for _, prefix := range []string{"切换项目 ", "使用项目 ", "项目 "} {
+		if strings.HasPrefix(text, prefix) && strings.TrimSpace(strings.TrimPrefix(text, prefix)) != "" {
+			return Command{Kind: CommandUse, Text: strings.TrimSpace(strings.TrimPrefix(text, prefix))}, nil
+		}
+	}
+	if strings.HasPrefix(text, "修改项目路径 ") {
+		rest := strings.TrimSpace(strings.TrimPrefix(text, "修改项目路径 "))
+		parts := strings.Fields(rest)
+		if len(parts) < 2 {
+			return Command{}, fmt.Errorf("修改项目路径格式应为：修改项目路径 <ID或名称> <绝对路径>")
+		}
+		return Command{Kind: CommandProject, Action: "path", Args: []string{parts[0], strings.TrimSpace(strings.TrimPrefix(rest, parts[0]))}}, nil
+	}
 	lines := strings.Split(text, "\n")
 	header := strings.Fields(strings.TrimSpace(lines[0]))
 	if len(header) == 0 || !strings.HasPrefix(header[0], "#") {
@@ -177,12 +196,12 @@ func ParseCommand(in Incoming) (Command, error) {
 		return Command{Kind: CommandHelp, Text: strings.TrimSpace(strings.TrimPrefix(text, header[0]))}, nil
 	case "#project":
 		if len(header) < 2 {
-			return Command{}, fmt.Errorf("#project 需要子命令：add/list/show/rename/remove/find")
+			return Command{}, fmt.Errorf("#project 需要子命令：add/list/current/show/rename/path/remove/find")
 		}
 		return Command{Kind: CommandProject, Action: strings.ToLower(header[1]), Args: header[2:]}, nil
 	case "#use":
 		if len(header) != 2 {
-			return Command{}, fmt.Errorf("#use 格式应为：#use <项目名称>")
+			return Command{}, fmt.Errorf("#use 格式应为：#use <项目ID或名称>")
 		}
 		return Command{Kind: CommandUse, Text: strings.ToLower(header[1])}, nil
 	case "#confirm":

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/ximengyi/taskian/internal/agent"
 	"github.com/ximengyi/taskian/internal/config"
+	"github.com/ximengyi/taskian/internal/feishu"
 	"github.com/ximengyi/taskian/internal/ilink"
 	"github.com/ximengyi/taskian/internal/message"
 	"github.com/ximengyi/taskian/internal/store"
@@ -58,12 +60,51 @@ func New(cfg *config.Config, logger *log.Logger) (*Dispatcher, error) {
 		_ = state.Close()
 		return nil, err
 	}
-	var channel transport.Transport
-	if cfg.Channel.Type == "ilink" {
-		channel, err = ilink.New(cfg.Channel, state)
-	} else {
-		channel, err = transport.NewFiles(cfg.InboxDir, cfg.OutboxDir)
+	if err := initializeProjects(cfg, state); err != nil {
+		_ = state.Close()
+		return nil, err
 	}
+	channels := make([]transport.Transport, 0, len(cfg.Channels))
+	for _, channelCfg := range cfg.Channels {
+		var item transport.Transport
+		switch channelCfg.Type {
+		case "ilink":
+			item, err = ilink.New(channelCfg, state)
+		case "feishu":
+			item, err = feishu.New(channelCfg, state, logger)
+		case "wechatian-files":
+			item, err = transport.NewFiles(cfg.InboxDir, cfg.OutboxDir)
+			if err == nil && cfg.SkipExistingOnFirstRun {
+				bootstrapped, stateErr := state.GetChannelState("wechatian-files.bootstrapped")
+				if stateErr != nil {
+					err = stateErr
+				} else if bootstrapped == "" {
+					history, pollErr := item.Poll(context.Background())
+					if pollErr != nil {
+						err = pollErr
+					} else {
+						for _, old := range history {
+							_, _ = state.ClaimInbound(old.Channel, old.ID, old.Sender, old.Body, old.ReceivedAt)
+							_ = state.MarkInbound(old.Channel, old.ID, "bootstrap-skipped")
+						}
+						err = state.SetChannelState("wechatian-files.bootstrapped", "true")
+						logger.Printf("首次运行已跳过 %d 条 Wechatian 历史消息", len(history))
+					}
+				}
+			}
+		default:
+			err = fmt.Errorf("不支持的通道 %s", channelCfg.Type)
+		}
+		if err != nil {
+			for _, opened := range channels {
+				_ = opened.Close()
+			}
+			_ = state.Close()
+			return nil, err
+		}
+		channels = append(channels, item)
+	}
+	channel, err := transport.NewMulti(channels...)
 	if err != nil {
 		_ = state.Close()
 		return nil, err
@@ -108,6 +149,46 @@ func New(cfg *config.Config, logger *log.Logger) (*Dispatcher, error) {
 	return newDispatcher(cfg, state, channel, adapters, logger), nil
 }
 
+func initializeProjects(cfg *config.Config, state *store.Store) error {
+	for name, project := range cfg.Projects {
+		if _, err := state.Project(name); errors.Is(err, sql.ErrNoRows) {
+			if _, err := state.PutProjectRecord(name, project.Path); err != nil {
+				return fmt.Errorf("导入配置项目 %s: %w", name, err)
+			}
+		} else if err != nil {
+			return err
+		}
+	}
+	projects, err := state.Projects()
+	if err != nil {
+		return err
+	}
+	if len(projects) == 0 && cfg.Mode == "personal" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		project, err := state.PutProjectRecord("global", home)
+		if err != nil {
+			return err
+		}
+		projects = []store.Project{project}
+	}
+	if _, err := state.ActiveProject(); errors.Is(err, sql.ErrNoRows) && len(projects) > 0 {
+		selected := projects[0]
+		if cfg.DefaultProject != "" {
+			if project, findErr := state.Project(cfg.DefaultProject); findErr == nil {
+				selected = project
+			}
+		} else if project, recentErr := state.MostRecentConversationProject(); recentErr == nil {
+			selected = project
+		}
+		return state.SetActiveProject(selected.ID)
+	} else {
+		return err
+	}
+}
+
 func newDispatcher(cfg *config.Config, state *store.Store, channel transport.Transport, adapters map[string]agent.Adapter, logger *log.Logger) *Dispatcher {
 	return &Dispatcher{cfg: cfg, store: state, transport: channel, agents: adapters, log: logger, queue: make(chan work, 128), running: map[string]context.CancelFunc{}, health: map[string]bool{}, systemRunner: runSystemAction}
 }
@@ -131,7 +212,7 @@ func (d *Dispatcher) Serve(ctx context.Context) error {
 	if err := d.store.RecoverInterrupted(); err != nil {
 		return err
 	}
-	d.log.Printf("Taskian 0.4.2 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
+	d.log.Printf("Taskian 0.5 已启动，通道=%s，并发=%d", d.transport.Name(), d.cfg.MaxConcurrentTasks)
 	d.runHealthCheck(ctx, true)
 	_ = d.store.SetChannelState("service.heartbeat", time.Now().UTC().Format(time.RFC3339Nano))
 	d.workerWG.Add(1)
@@ -168,7 +249,7 @@ func (d *Dispatcher) Serve(ctx context.Context) error {
 			return nil
 		}
 		if err := d.poll(ctx, true); err != nil {
-			if errors.Is(err, ilink.ErrSessionExpired) {
+			if errors.Is(err, ilink.ErrSessionExpired) && d.transport.Name() == "ilink" {
 				d.log.Printf("%v", err)
 				return err
 			}
@@ -210,19 +291,30 @@ func (d *Dispatcher) poll(ctx context.Context, async bool) error {
 	if err != nil {
 		return err
 	}
-	if d.transport.Name() == "wechatian-files" && d.cfg.SkipExistingOnFirstRun {
+	if d.cfg.SkipExistingOnFirstRun {
 		bootstrapped, e := d.store.GetChannelState("wechatian-files.bootstrapped")
 		if e != nil {
 			return e
 		}
 		if bootstrapped == "" {
+			kept := messages[:0]
+			skipped := 0
 			for _, m := range messages {
+				if m.Channel != "wechatian-files" {
+					kept = append(kept, m)
+					continue
+				}
 				_, _ = d.store.ClaimInbound(m.Channel, m.ID, m.Sender, m.Body, m.ReceivedAt)
 				_ = d.store.MarkInbound(m.Channel, m.ID, "bootstrap-skipped")
+				skipped++
 			}
-			_ = d.store.SetChannelState("wechatian-files.bootstrapped", "true")
-			d.log.Printf("首次运行已跳过 %d 条历史消息", len(messages))
-			return nil
+			if skipped > 0 {
+				_ = d.store.SetChannelState("wechatian-files.bootstrapped", "true")
+				d.log.Printf("首次运行已跳过 %d 条 Wechatian 历史消息", skipped)
+			} else if d.transport.Name() == "wechatian-files" && len(messages) == 0 {
+				_ = d.store.SetChannelState("wechatian-files.bootstrapped", "true")
+			}
+			messages = kept
 		}
 	}
 	for _, incoming := range messages {
@@ -256,6 +348,15 @@ func (d *Dispatcher) handle(ctx context.Context, in message.Incoming, async bool
 		}
 		if len(waiting) == 1 {
 			return d.handleReply(ctx, in, message.Command{Kind: message.CommandReply, TaskID: waiting[0].ID, Text: strings.TrimSpace(in.Body)}, async)
+		}
+		if len(waiting) == 0 {
+			if id, parseErr := strconv.ParseInt(strings.TrimSpace(in.Body), 10, 64); parseErr == nil && id > 0 {
+				if kind, active, contextErr := d.store.SelectionContext(in.Channel, in.Sender, time.Now()); contextErr != nil {
+					return contextErr
+				} else if active && kind == "project" {
+					return d.handleUse(ctx, in, strconv.FormatInt(id, 10))
+				}
+			}
 		}
 		if len(waiting) == 0 && d.cfg.Mode == "personal" {
 			return d.handleTask(ctx, in, message.Task{Agent: d.cfg.DefaultAgent, Prompt: strings.TrimSpace(in.Body), Source: in}, async)
@@ -294,7 +395,7 @@ func (d *Dispatcher) handleTask(ctx context.Context, in message.Incoming, task m
 	if task.Agent == "task" || task.Agent == "taskian" || task.Agent == "" {
 		task.Agent = d.cfg.DefaultAgent
 	}
-	projectName, projectPath, prompt, err := d.resolveTaskTarget(in, task)
+	projectID, projectName, projectPath, prompt, err := d.resolveTaskTarget(in, task)
 	if err != nil {
 		_ = d.store.MarkInbound(in.Channel, in.ID, "rejected")
 		return d.send(ctx, in.Sender, "⚠️ "+err.Error(), "", "rejected")
@@ -307,7 +408,7 @@ func (d *Dispatcher) handleTask(ctx context.Context, in message.Incoming, task m
 		_ = d.store.MarkInbound(in.Channel, in.ID, "rejected")
 		return d.send(ctx, in.Sender, "⛔ 未配置 Agent："+task.Agent, "", "rejected")
 	}
-	record, err := d.store.CreateTask(store.Task{SourceMessageID: in.ID, Channel: in.Channel, Sender: in.Sender, Conversation: in.Conversation, Agent: task.Agent, Project: projectName, ProjectPath: projectPath, Prompt: prompt, Status: store.StatusQueued})
+	record, err := d.store.CreateTask(store.Task{SourceMessageID: in.ID, Channel: in.Channel, Sender: in.Sender, Conversation: in.Conversation, Agent: task.Agent, ProjectID: projectID, Project: projectName, ProjectPath: projectPath, Prompt: prompt, Status: store.StatusQueued})
 	if err != nil {
 		return err
 	}
@@ -325,83 +426,119 @@ func (d *Dispatcher) handleTask(ctx context.Context, in message.Incoming, task m
 	return nil
 }
 
-func (d *Dispatcher) resolveTaskTarget(in message.Incoming, task message.Task) (name, path, prompt string, err error) {
+func (d *Dispatcher) resolveTaskTarget(in message.Incoming, task message.Task) (projectID int64, name, path, prompt string, err error) {
 	target := strings.TrimSpace(task.Project)
 	prompt = strings.TrimSpace(task.Prompt)
-	resolve := func(value string) (string, string, bool) {
+	resolve := func(value string) (int64, string, string, bool) {
 		key := strings.ToLower(strings.TrimSpace(value))
 		if p, ok := d.cfg.Projects[key]; ok {
-			return key, p.Path, true
+			registered, _ := d.store.Project(key)
+			return registered.ID, key, p.Path, true
 		}
 		if p, e := d.store.Project(key); e == nil {
 			_ = d.store.TouchProject(key)
-			return p.Name, p.Path, true
+			return p.ID, p.Name, p.Path, true
 		}
 		if filepath.IsAbs(value) {
 			info, e := os.Stat(value)
 			if e == nil && info.IsDir() {
-				return filepath.Base(filepath.Clean(value)), filepath.Clean(value), true
+				return 0, filepath.Base(filepath.Clean(value)), filepath.Clean(value), true
 			}
 		}
-		return "", "", false
+		return 0, "", "", false
 	}
 	if target != "" {
-		if name, path, ok := resolve(target); ok {
-			return name, path, prompt, nil
+		if id, name, path, ok := resolve(target); ok {
+			return id, name, path, prompt, nil
 		}
 	}
-	current, e := d.store.ConversationProject(in.Channel, in.Conversation)
-	if e != nil {
-		return "", "", "", e
+	var current store.Project
+	var e error
+	current, e = d.currentProject(in.Sender)
+	if errors.Is(e, sql.ErrNoRows) && d.cfg.DefaultProject != "" {
+		current, e = d.store.Project(d.cfg.DefaultProject)
 	}
-	if current == "" {
-		current = d.cfg.DefaultProject
-	}
-	if current != "" {
-		if name, path, ok := resolve(current); ok {
+	if e == nil {
+		if id, name, path, ok := resolve(strconv.FormatInt(current.ID, 10)); ok {
 			if target != "" {
 				prompt = strings.TrimSpace(target + " " + prompt)
 			}
 			if prompt == "" {
-				return "", "", "", fmt.Errorf("任务内容不能为空")
+				return 0, "", "", "", fmt.Errorf("任务内容不能为空")
 			}
-			return name, path, prompt, nil
+			return id, name, path, prompt, nil
 		}
 	}
-	if current == "" && d.cfg.Mode == "personal" {
-		home, homeErr := os.UserHomeDir()
-		if homeErr == nil {
-			if prompt == "" {
-				prompt = strings.TrimSpace(target)
-			}
-			if prompt != "" {
-				return "global", home, prompt, nil
-			}
-		}
+	if e != nil && !errors.Is(e, sql.ErrNoRows) {
+		return 0, "", "", "", e
 	}
 	if target == "" {
-		return "", "", "", fmt.Errorf("尚未选择项目，请使用 #use <项目> 或在任务中指定项目名称/绝对路径")
+		return 0, "", "", "", fmt.Errorf("尚未选择项目，请发送 项目列表 后选择项目")
 	}
-	return "", "", "", fmt.Errorf("找不到项目或目录 %q；可先发送 #project add <名称> <绝对路径>", target)
+	return 0, "", "", "", fmt.Errorf("找不到项目或目录 %q；可先发送 #project add <名称> <绝对路径>", target)
 }
 
-func (d *Dispatcher) handleUse(ctx context.Context, in message.Incoming, name string) error {
-	p, err := d.store.Project(name)
+func (d *Dispatcher) handleUse(ctx context.Context, in message.Incoming, reference string) error {
+	p, err := d.store.Project(reference)
 	if errors.Is(err, sql.ErrNoRows) {
-		if configured, ok := d.cfg.Projects[name]; ok {
-			p = store.Project{Name: name, Path: configured.Path}
+		if configured, ok := d.cfg.Projects[reference]; ok {
+			p, err = d.store.PutProjectRecord(reference, configured.Path)
+			if err != nil {
+				return err
+			}
 		} else {
-			return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+name, "", "project")
+			return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+reference, "", "project")
 		}
 	} else if err != nil {
 		return err
 	}
-	if err := d.store.SetConversationProject(in.Channel, in.Conversation, p.Name); err != nil {
-		return err
+	if d.cfg.Mode == "personal" {
+		if err := d.store.SetActiveProject(p.ID); err != nil {
+			return err
+		}
+	} else {
+		if err := d.store.SetSenderProject(in.Sender, p.ID); err != nil {
+			return err
+		}
 	}
-	_ = d.store.TouchProject(p.Name)
+	_ = d.store.TouchProject(strconv.FormatInt(p.ID, 10))
+	_ = d.store.ClearSelectionContext(in.Channel, in.Sender)
 	_ = d.store.MarkInbound(in.Channel, in.ID, "project-use")
-	return d.send(ctx, in.Sender, fmt.Sprintf("✅ 当前项目：%s\n目录：%s", p.Name, p.Path), "", "project")
+	return d.send(ctx, in.Sender, fmt.Sprintf("✅ 已全局切换项目\n[%d] %s\n目录：%s\n微信和飞书后续任务均使用此项目。", p.ID, p.Name, p.Path), "", "project")
+}
+
+func (d *Dispatcher) currentProject(sender string) (store.Project, error) {
+	if d.cfg.Mode == "personal" {
+		project, err := d.store.ActiveProject()
+		if !errors.Is(err, sql.ErrNoRows) {
+			return project, err
+		}
+		projects, listErr := d.store.Projects()
+		if listErr != nil {
+			return store.Project{}, listErr
+		}
+		if len(projects) == 0 {
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				return store.Project{}, homeErr
+			}
+			project, err = d.store.PutProjectRecord("global", home)
+			if err != nil {
+				return store.Project{}, err
+			}
+		} else {
+			project = projects[0]
+		}
+		if err := d.store.SetActiveProject(project.ID); err != nil {
+			return store.Project{}, err
+		}
+		return project, nil
+	}
+	project, err := d.store.SenderProject(sender)
+	if errors.Is(err, sql.ErrNoRows) && d.cfg.DefaultProject != "" {
+		return d.store.Project(d.cfg.DefaultProject)
+	}
+	return project, err
 }
 
 func (d *Dispatcher) handleProject(ctx context.Context, in message.Incoming, command message.Command) error {
@@ -419,33 +556,43 @@ func (d *Dispatcher) handleProject(ctx context.Context, in message.Incoming, com
 		if err != nil || !info.IsDir() {
 			return d.send(ctx, in.Sender, "⚠️ 项目目录不存在或不是目录："+path, "", "project")
 		}
-		if err := d.store.PutProject(name, path); err != nil {
+		if existing, lookupErr := d.store.ProjectByPath(path); lookupErr == nil && !strings.EqualFold(existing.Name, name) {
+			return d.send(ctx, in.Sender, fmt.Sprintf("⚠️ 该目录已属于项目 [%d] %s", existing.ID, existing.Name), "", "project")
+		}
+		project, err := d.store.PutProjectRecord(name, path)
+		if err != nil {
 			return err
 		}
 		_ = d.store.MarkInbound(in.Channel, in.ID, "project-add")
-		return d.send(ctx, in.Sender, fmt.Sprintf("✅ 已注册项目 %s\n%s", name, path), "", "project")
+		return d.send(ctx, in.Sender, fmt.Sprintf("✅ 已注册项目\n[%d] %s\n%s", project.ID, project.Name, project.Path), "", "project")
 	case "list":
 		projects, err := d.store.Projects()
 		if err != nil {
 			return err
 		}
-		current, _ := d.store.ConversationProject(in.Channel, in.Conversation)
-		lines := []string{"项目列表："}
+		current, _ := d.currentProject(in.Sender)
+		lines := []string{fmt.Sprintf("项目列表（%d 个）：", len(projects))}
 		for _, p := range projects {
-			mark := ""
-			if p.Name == current {
-				mark = "（当前）"
+			mark := "  "
+			if p.ID == current.ID {
+				mark = " ★"
 			}
-			lines = append(lines, fmt.Sprintf("- %s%s：%s", p.Name, mark, p.Path))
-		}
-		for name, p := range d.cfg.Projects {
-			lines = append(lines, fmt.Sprintf("- %s（配置）：%s", name, p.Path))
+			lines = append(lines, fmt.Sprintf("[%d] %s%s  %s", p.ID, p.Name, mark, p.Path))
 		}
 		if len(lines) == 1 {
 			lines = append(lines, "尚未注册项目。使用：#project add <名称> <绝对路径>")
 		}
+		lines = append(lines, "", "5 分钟内可直接回复项目 ID，例如：3")
+		_ = d.store.SetSelectionContext(in.Channel, in.Sender, "project", time.Now().Add(5*time.Minute))
 		_ = d.store.MarkInbound(in.Channel, in.ID, "project-list")
 		return d.send(ctx, in.Sender, strings.Join(lines, "\n"), "", "project")
+	case "current":
+		p, err := d.currentProject(in.Sender)
+		if err != nil {
+			return d.send(ctx, in.Sender, "⚠️ 当前没有可用项目，请发送 项目列表。", "", "project")
+		}
+		_ = d.store.MarkInbound(in.Channel, in.ID, "project-current")
+		return d.send(ctx, in.Sender, fmt.Sprintf("当前项目\n[%d] %s\n目录：%s\n默认 Agent：%s\n来源：全局选择", p.ID, p.Name, p.Path, d.cfg.DefaultAgent), "", "project")
 	case "show":
 		if len(args) != 1 {
 			return d.send(ctx, in.Sender, "格式：#project show <名称>", "", "project")
@@ -454,7 +601,7 @@ func (d *Dispatcher) handleProject(ctx context.Context, in message.Incoming, com
 		if err != nil {
 			return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+args[0], "", "project")
 		}
-		return d.send(ctx, in.Sender, fmt.Sprintf("项目：%s\n目录：%s\n最近使用：%s", p.Name, p.Path, p.LastUsedAt.Local().Format("2006-01-02 15:04")), "", "project")
+		return d.send(ctx, in.Sender, fmt.Sprintf("项目：[%d] %s\n目录：%s\n最近使用：%s", p.ID, p.Name, p.Path, p.LastUsedAt.Local().Format("2006-01-02 15:04")), "", "project")
 	case "rename":
 		if len(args) != 2 {
 			return d.send(ctx, in.Sender, "格式：#project rename <旧名称> <新名称>", "", "project")
@@ -466,9 +613,46 @@ func (d *Dispatcher) handleProject(ctx context.Context, in message.Incoming, com
 			return err
 		}
 		return d.send(ctx, in.Sender, fmt.Sprintf("✅ 项目 %s 已重命名为 %s", args[0], args[1]), "", "project")
+	case "path", "set-path":
+		if len(args) < 2 {
+			return d.send(ctx, in.Sender, "格式：#project path <ID或名称> <绝对路径>", "", "project")
+		}
+		path := strings.Trim(strings.TrimSpace(strings.Join(args[1:], " ")), `"`)
+		path = filepath.Clean(path)
+		if !filepath.IsAbs(path) {
+			return d.send(ctx, in.Sender, "⚠️ 项目目录必须是绝对路径", "", "project")
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil || !info.IsDir() {
+			return d.send(ctx, in.Sender, "⚠️ 项目目录不存在或不是目录："+path, "", "project")
+		}
+		targetProject, targetErr := d.store.Project(args[0])
+		if targetErr != nil {
+			return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+args[0], "", "project")
+		}
+		if existing, lookupErr := d.store.ProjectByPath(path); lookupErr == nil && existing.ID != targetProject.ID {
+			return d.send(ctx, in.Sender, fmt.Sprintf("⚠️ 该目录已属于项目 [%d] %s", existing.ID, existing.Name), "", "project")
+		}
+		project, updateErr := d.store.UpdateProjectPath(args[0], path)
+		if updateErr != nil {
+			if errors.Is(updateErr, sql.ErrNoRows) {
+				return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+args[0], "", "project")
+			}
+			return d.send(ctx, in.Sender, "⚠️ 无法修改项目路径，可能已被其他项目使用："+updateErr.Error(), "", "project")
+		}
+		_ = d.store.MarkInbound(in.Channel, in.ID, "project-path")
+		return d.send(ctx, in.Sender, fmt.Sprintf("✅ 项目路径已更新\n[%d] %s\n目录：%s\n后续新任务立即使用此路径。", project.ID, project.Name, project.Path), "", "project")
 	case "remove":
 		if len(args) != 1 {
-			return d.send(ctx, in.Sender, "格式：#project remove <名称>", "", "project")
+			return d.send(ctx, in.Sender, "格式：#project remove <ID或名称>", "", "project")
+		}
+		project, lookupErr := d.store.Project(args[0])
+		if lookupErr != nil {
+			return d.send(ctx, in.Sender, "⚠️ 找不到项目 "+args[0], "", "project")
+		}
+		current, _ := d.currentProject(in.Sender)
+		if current.ID == project.ID {
+			return d.send(ctx, in.Sender, "⚠️ 不能删除当前项目。请先切换到其他项目，再删除。", "", "project")
 		}
 		if err := d.store.RemoveProject(args[0]); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -476,7 +660,7 @@ func (d *Dispatcher) handleProject(ctx context.Context, in message.Incoming, com
 			}
 			return err
 		}
-		return d.send(ctx, in.Sender, "✅ 已删除项目别名 "+args[0]+"；磁盘文件未改动。", "", "project")
+		return d.send(ctx, in.Sender, fmt.Sprintf("✅ 已删除项目 [%d] %s；磁盘文件未改动。", project.ID, project.Name), "", "project")
 	case "find":
 		if len(args) < 2 {
 			return d.send(ctx, in.Sender, "格式：#project find <目录名> <搜索根目录>", "", "project")
@@ -532,29 +716,31 @@ func findDirectories(ctx context.Context, name, root string, limit int) ([]strin
 }
 
 func (d *Dispatcher) help(in message.Incoming, topic string) string {
-	current, _ := d.store.ConversationProject(in.Channel, in.Conversation)
-	if current == "" {
-		if d.cfg.Mode == "personal" {
-			current = "全局"
-		} else {
-			current = "未设置"
-		}
+	current := "未设置"
+	if project, err := d.currentProject(in.Sender); err == nil {
+		current = fmt.Sprintf("[%d] %s", project.ID, project.Name)
 	}
 	agents := make([]string, 0, len(d.agents))
 	for name := range d.agents {
 		agents = append(agents, name)
 	}
 	sort.Strings(agents)
-	header := fmt.Sprintf("Taskian 0.4.2 帮助\n默认 Agent：%s\n可用 Agent：%s\n当前项目：%s\n", d.cfg.DefaultAgent, strings.Join(agents, "、"), current)
+	header := fmt.Sprintf("Taskian 0.5 帮助\n默认 Agent：%s\n可用 Agent：%s\n当前项目：%s\n", d.cfg.DefaultAgent, strings.Join(agents, "、"), current)
 	switch strings.ToLower(strings.TrimSpace(topic)) {
 	case "project":
-		return header + "\n#project add <名称> <绝对路径>\n#project list\n#project show <名称>\n#project rename <旧名> <新名>\n#project remove <名称>\n#project find <目录名> <根目录>\n#use <项目名称>"
+		return header + "\n当前项目\n项目列表\n切换项目 <ID>\n修改项目路径 <ID> <绝对路径>\n#project add <名称> <绝对路径>\n#project show <ID或名称>\n#project rename <ID或名称> <新名>\n#project path <ID或名称> <路径>\n#project remove <ID或名称>\n#project find <目录名> <根目录>\n#use <ID或名称>"
 	case "task", "agent":
 		return header + "\n个人模式可直接发送普通文本，使用默认 Agent。\n#task <项目> <任务>\n#codex <项目> <任务>\n#cursor <项目> <任务>\n#reply <任务号> <回答>\n#confirm <确认码>  确认关机/重启\n#status [任务号]\n#cancel <任务号>"
+	case "channel":
+		channels := make([]string, 0, len(d.cfg.Channels))
+		for _, channel := range d.cfg.Channels {
+			channels = append(channels, channel.Type)
+		}
+		return header + "\n已启用通道：" + strings.Join(channels, "、") + "\n本机诊断：taskian status\n微信登录：taskian ilink status\n飞书绑定：taskian feishu status\n详细运行日志：taskian service logs"
 	case "examples":
 		return header + "\n示例：\n#project add week-report D:\\work\\week-report\n#use week-report\n#cursor 写一下本周周报\n#task /srv/code/demo 运行测试\n#reply T-12345678 选择 B"
 	default:
-		return header + "\n个人模式可直接发送任务文字。\n任务：#task / #codex / #cursor\n回答：#reply <任务号> <回答>\n确认系统操作：#confirm <确认码>\n状态：#status / #cancel\n项目：#project / #use\n更多：help task、help project"
+		return header + "\n当前项目    查看当前项目\n项目列表    按数字选择项目\n切换项目 3  全局切换\n直接发送文字即可在当前项目执行\n任务：#task / #codex / #cursor\n回答：#reply <任务号> <回答>\n状态：#status / #cancel\n更多：help task、help project、help channel"
 	}
 }
 

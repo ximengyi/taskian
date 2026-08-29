@@ -108,3 +108,27 @@ func TestParseConfirm(t *testing.T) {
 		t.Fatalf("command=%+v err=%v", command, err)
 	}
 }
+
+func TestParseNaturalProjectCommands(t *testing.T) {
+	cases := []struct {
+		body, action, value string
+	}{
+		{"当前项目", "current", ""},
+		{"项目列表", "list", ""},
+		{"切换项目 12", "use", "12"},
+		{`修改项目路径 12 D:\Work Tree\demo`, "path", "12"},
+	}
+	for _, test := range cases {
+		command, err := ParseCommand(Incoming{Body: test.body})
+		if err != nil {
+			t.Fatalf("body=%q err=%v", test.body, err)
+		}
+		if test.action == "use" {
+			if command.Kind != CommandUse || command.Text != test.value {
+				t.Fatalf("body=%q command=%+v", test.body, command)
+			}
+		} else if command.Kind != CommandProject || command.Action != test.action || (test.value != "" && command.Args[0] != test.value) {
+			t.Fatalf("body=%q command=%+v", test.body, command)
+		}
+	}
+}

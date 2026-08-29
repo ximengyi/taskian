@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"path/filepath"
@@ -130,6 +131,46 @@ func TestPersonalPlainTextUsesDefaultAgentAndGlobalHome(t *testing.T) {
 	}
 	if waiting[0].Project != "global" || waiting[0].Agent != "codex" || waiting[0].Prompt != "写一下周报" {
 		t.Fatalf("task=%+v", waiting[0])
+	}
+}
+
+func TestProjectIDSelectionIsGlobalAcrossChannels(t *testing.T) {
+	dir := t.TempDir()
+	state, err := store.Open(filepath.Join(dir, "taskian.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := state.PutProjectRecord("first", filepath.Join(dir, "first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPath := filepath.Join(dir, "second")
+	second, err := state.PutProjectRecord("second", secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetActiveProject(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	channel := &fakeTransport{}
+	cfg := &config.Config{Mode: "personal", DefaultAgent: "codex", MaxReplyChars: 6000, WaitingUserTimeout: "72h", Projects: map[string]config.ProjectConfig{}}
+	d := newDispatcher(cfg, state, channel, map[string]agent.Adapter{}, log.New(io.Discard, "", 0))
+	defer d.Close()
+	channel.in = []message.Incoming{{ID: "list", Channel: "ilink", Sender: "wechat-owner", Conversation: "wechat-owner", Body: "项目列表", ReceivedAt: time.Now()}}
+	if err := d.poll(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	channel.in = []message.Incoming{{ID: "choose", Channel: "ilink", Sender: "wechat-owner", Conversation: "wechat-owner", Body: fmt.Sprint(second.ID), ReceivedAt: time.Now()}}
+	if err := d.poll(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	current, err := d.currentProject("feishu-chat")
+	if err != nil || current.ID != second.ID || current.Path != secondPath {
+		t.Fatalf("current=%+v err=%v", current, err)
+	}
+	joined := strings.Join(channel.sent, "\n")
+	if !strings.Contains(joined, "[1] first") || !strings.Contains(joined, "已全局切换项目") {
+		t.Fatalf("messages=%s", joined)
 	}
 }
 

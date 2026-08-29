@@ -30,3 +30,9 @@ SOFTWARE.
 ```
 
 Taskian also uses [`github.com/mdp/qrterminal/v3`](https://github.com/mdp/qrterminal) under the MIT License to render terminal QR codes with a correct quiet zone and module polarity.
+
+Taskian's Feishu transport uses the official
+[`github.com/larksuite/channel-sdk-go`](https://github.com/larksuite/channel-sdk-go)
+and [`github.com/larksuite/oapi-sdk-go`](https://github.com/larksuite/oapi-sdk-go)
+libraries, both distributed under the MIT License. Their transitive dependencies
+and complete license texts are available from the linked upstream repositories.

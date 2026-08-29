@@ -1,14 +1,22 @@
 # Taskian
 
-Taskian 是一个跨平台、本地优先的双向 AI 任务调度器。它让你通过微信控制本机或服务器上的 Codex、Cursor 等编程 Agent，并在 Agent 需要补充信息时把问题发回微信，收到回答后恢复同一个原生会话继续执行。
+Taskian 是一个跨平台、本地优先的双向 AI 任务调度器。它让你通过微信或飞书控制本机、服务器上的 Codex、Cursor 等编程 Agent，并在 Agent 需要补充信息时把问题发回原聊天，收到回答后恢复同一个原生会话继续执行。
 
 ```text
-微信 ⇄ 腾讯 iLink ⇄ Taskian ⇄ Codex / Cursor ⇄ 代码仓库
+微信（腾讯 iLink） ─┐
+                    ├─ Taskian ⇄ Codex / Cursor ⇄ 代码仓库
+飞书（长连接） ─────┘
 ```
 
 Taskian 不在用户和编程 Agent 之间增加第二个大模型。消息解析、权限检查、排队、去重和会话路由均使用确定性程序逻辑；模型用量来自实际执行任务的 Codex、Cursor 或其他 Agent。
 
-## 0.4.2 能力
+## 0.5 能力
+
+- 微信和飞书可以在同一进程中同时在线；通道故障相互隔离，结果回到任务来源聊天。
+- 飞书使用官方 Go SDK 的 WebSocket 长连接，不需要公网服务器或回调地址；提供自动注册与手工企业应用两种配置方式。
+- 项目拥有稳定自增数字 ID；`项目列表`、`当前项目`、`切换项目 3` 和直接回复 `3` 都可以管理工作目录。
+- 个人模式只有一个跨微信、飞书共享的全局当前项目，切换后普通文本及 `#task`、`#codex`、`#cursor` 都使用它。
+- 支持 `修改项目路径 <ID> <绝对路径>`，后续任务立即使用新目录。
 
 - 无参数运行进入首次启动向导：自动生成个人配置、探测 Agent、打印 iLink 二维码并选择后台运行。
 - Windows 双击即可初始化，后台使用当前用户任务计划程序；Linux 使用 systemd user service。
@@ -72,7 +80,24 @@ Windows 可以直接双击 `taskian-windows-amd64.exe`。程序会自动生成�
 taskian-windows-amd64.exe
 ```
 
-## 微信命令
+## 配置飞书
+
+保留现有微信登录的同时，可执行：
+
+```text
+taskian feishu setup
+taskian service restart
+```
+
+默认使用飞书官方设备授权流程自动创建并配置应用；如果企业策略不允许自动创建应用，也可在飞书开放平台创建企业自建应用，启用机器人、`im.message.receive_v1` 事件和长连接后执行：
+
+```text
+taskian feishu setup -manual -app-id cli_xxx -app-secret xxx
+```
+
+手工模式会显示一次性绑定码。重启 Taskian 后向机器人发送 `绑定 <绑定码>`，完成本机所有者绑定。App Secret 只保存在 `~/.taskian/feishu.json`，不会出现在状态输出或聊天回复中。
+
+## 微信与飞书命令
 
 个人模式下可以直接发送自然语言任务，例如：
 
@@ -80,7 +105,7 @@ taskian-windows-amd64.exe
 帮我整理一下当前目录的 README
 ```
 
-没有通过 `#use` 选择项目时，Taskian 使用默认 Agent，并以运行 Taskian 的用户主目录作为“全局”工作目录。
+没有选择项目时，Taskian 使用默认 Agent，并以运行 Taskian 的用户主目录作为“global”项目。当前项目在微信与飞书间共享并在重启后保留。
 
 创建 Codex 任务：
 
@@ -130,11 +155,14 @@ Agent 提问时，Taskian 返回类似：
 
 ```text
 #project add week-report D:\cursorwork\week-report
-#project list
-#use week-report
+项目列表
+切换项目 2
+修改项目路径 2 D:\cursorwork\week-report-new
 #cursor 写一下本周周报
 #task week-report 写一下本周周报
 ```
+
+发送“项目列表”后 5 分钟内，可以只回复列表中的数字 ID。发送“当前项目”可随时查看当前 ID、名称和实际路径。
 
 也可以在任务中直接填写绝对目录。`#task` 使用默认 Agent，`#codex` 和 `#cursor` 明确选择 Agent。
 
@@ -153,17 +181,23 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
 
 ## 配置
 
-最小 iLink 配置结构：
+0.5 的多通道配置结构：
 
 ```json
 {
   "mode": "personal",
   "default_agent": "codex",
   "database_path": "~/.taskian/taskian.db",
-  "channel": {
-    "type": "ilink",
-    "state_path": "~/.taskian/ilink.json"
-  },
+  "channels": [
+    {
+      "type": "ilink",
+      "state_path": "~/.taskian/ilink.json"
+    },
+    {
+      "type": "feishu",
+      "state_path": "~/.taskian/feishu.json"
+    }
+  ],
   "health": {
     "enabled": true,
     "interval": "5m"
@@ -176,10 +210,10 @@ Codex/Cursor：完整 Agent 会话、代码读取和工具上下文
 - `database_path`：SQLite 状态库路径。
 - `mode`：默认 `personal`；旧版带项目配置时自动保持 `controlled` 受控模式。
 - `default_agent`：未明确指定 Agent 时使用的默认值。
-- `channel.type`：`ilink` 或 `wechatian-files`。
+- `channels`：可同时启用 `ilink`、`feishu`，也保留 `wechatian-files`。旧版单个 `channel` 会自动迁移兼容。
 - `channel.allowed_senders`：可选发送者白名单；未配置时只允许扫码绑定用户。
 - `max_concurrent_tasks`：最大并发 Agent 数，默认 2。
-- `waiting_user_timeout`：等待微信回答的最长时间，默认 72 小时。
+- `waiting_user_timeout`：等待聊天回答的最长时间，默认 72 小时。
 - `health.enabled`：是否定时检查，默认开启；启动预检不受此项影响。
 - `health.interval`：健康检查间隔，默认 5 分钟。
 - `health.notify_senders`：可选提醒接收者；iLink 默认使用扫码绑定用户。
@@ -189,7 +223,7 @@ Cursor 默认不会自动添加 `--force`；只有明确设置 `"force": true` �
 
 ## 运行日志
 
-Windows 前台窗口会显示以下处理过程：收到微信消息、任务号、Agent、项目目录、Agent 实时输出、等待回答、完成或详细错误。后台服务会把相同内容同时写入：
+Windows 前台窗口会显示以下处理过程：收到微信/飞书消息、来源通道、任务号、Agent、项目目录、Agent 实时输出、等待回答、完成或详细错误。后台服务会把相同内容同时写入：
 
 ```text
 %USERPROFILE%\.taskian\logs\taskian.log
@@ -224,13 +258,16 @@ taskian status                查看本地任务统计
 taskian ilink login           扫码登录
 taskian ilink status          查看绑定状态
 taskian ilink logout          清除绑定
+taskian feishu setup          配置飞书长连接并绑定所有者
+taskian feishu status         查看飞书配置状态
+taskian feishu logout         清除飞书凭据与绑定
 taskian example-config        输出示例配置
 taskian version               显示版本
 ```
 
 ## 安全边界
 
-- iLink 个人模式只接受扫码绑定身份；受控模式可额外限制发送者、项目和 Agent。
+- iLink 个人模式只接受扫码绑定身份；飞书只接受自动授权用户或一次性绑定码绑定的所有者。
 - 个人模式允许绝对项目目录，但微信消息不能指定任意可执行程序。
 - Taskian 直接启动进程，不通过 shell 解释任务正文。
 - `#reply` 只回答普通问题，不能扩大沙箱或系统权限。
@@ -273,6 +310,7 @@ Tag 推送后，GitHub Actions 自动测试并构建 Windows amd64、Linux amd64
 - [0.2 需求与验收标准](docs/0.2.md)
 - [0.3 需求与验收标准](docs/0.3.md)
 - [0.4 规划与验收标准](docs/0.4.md)
+- [0.5 需求与验收标准](docs/0.5.md)
 - [产品定位与优势](docs/product-advantages.md)
 - [版本文档约定](docs/README.md)
 

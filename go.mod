@@ -4,6 +4,8 @@ go 1.23.0
 
 require (
 	github.com/gofrs/flock v0.12.1
+	github.com/larksuite/channel-sdk-go v0.1.0
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.7
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -12,7 +14,9 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
